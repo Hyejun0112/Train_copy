@@ -142,8 +142,11 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
 
         def _close(c):
             return bool(c) and len(c) == 3 and all(
-                abs(a - b) <= 0.08 for a, b in zip(c, target)
+                abs(a - b) <= 0.15 for a, b in zip(c, target)
             )
+
+        def _has_color(c):
+            return bool(c) and len(c) == 3
 
         # FreeText(텍스트) 마크업: "글꼴 색상" 기준
         # 그 외 마크업: "색" (테두리/기본색, stroke) 기준
@@ -152,11 +155,15 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
             if font_color is not None:
                 if not _close(font_color):
                     return False
-            elif not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
-                return False
+            elif _has_color(colors.get("stroke")) or _has_color(colors.get("fill")):
+                if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
+                    return False
+            # 색 정보가 전혀 없으면(색을 알 수 없으면) 색 조건은 통과시킨다
         else:
-            if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
-                return False
+            if _has_color(colors.get("stroke")) or _has_color(colors.get("fill")):
+                if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
+                    return False
+            # 색 정보가 전혀 없으면(색을 알 수 없으면) 색 조건은 통과시킨다
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
@@ -366,9 +373,11 @@ class App(tk.Tk):
         folder_frm.columnconfigure(0, weight=1)
 
         self.lbl_src = self._folder_row(folder_frm, 0, "Source 폴더",
-                                        self._select_source, "#a6e3a1")
+                                        self._select_source, "#a6e3a1",
+                                        folder_cmd=self._select_source_folder)
         self.lbl_dst = self._folder_row(folder_frm, 1, "Target 폴더",
-                                        self._select_target, "#89b4fa")
+                                        self._select_target, "#89b4fa",
+                                        folder_cmd=self._select_target_folder)
         self.lbl_out = self._folder_row(folder_frm, 2, "Output 폴더",
                                         self._select_output, "#f9e2af")
 
@@ -600,19 +609,24 @@ class App(tk.Tk):
                  ).grid(row=row, column=0, sticky="ew", pady=(10, 0))
 
     def _folder_row(self, parent, row: int, label: str,
-                    cmd, accent: str) -> tk.Label:
+                    cmd, accent: str, folder_cmd=None) -> tk.Label:
         frm = tk.Frame(parent, bg="#1e1e2e")
         frm.grid(row=row, column=0, sticky="ew", pady=2)
-        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(2, weight=1)
 
         tk.Button(frm, text=label, command=cmd, width=13,
                   **self._bkw(accent, fg="#1e1e2e")
                   ).grid(row=0, column=0, sticky="w")
 
+        if folder_cmd is not None:
+            tk.Button(frm, text="폴더 전체", command=folder_cmd, width=8,
+                      **self._bkw("#6c7086", fg="#cdd6f4")
+                      ).grid(row=0, column=1, sticky="w", padx=(4, 0))
+
         lbl = tk.Label(frm, text="(미설정)",
                        font=("Segoe UI", 8), fg="#6c7086",
                        bg="#1e1e2e", anchor="w", wraplength=220)
-        lbl.grid(row=0, column=1, sticky="ew", padx=6)
+        lbl.grid(row=0, column=2, sticky="ew", padx=6)
         return lbl
 
     @staticmethod
@@ -644,6 +658,40 @@ class App(tk.Tk):
         self.notebook.select(0)
         self._log(f"[Source] {src_folder}  ({len(src_files)}개)\n")
         for f in src_files:
+            self._log(f"    - {f}\n")
+        self._refresh_mapping_label()
+
+    def _select_source_folder(self):
+        global src_folder, src_files
+        path = filedialog.askdirectory(title="Source 폴더 선택 (폴더 내 모든 PDF 사용)")
+        if not path:
+            return
+        src_folder = path
+        src_files = sorted(_list_pdfs(path))
+        self.lbl_src.config(
+            text=f"{os.path.basename(src_folder)}  ({len(src_files)}개)", fg="#a6adc8"
+        )
+        self._update_listbox(self.list_src, src_files)
+        self.notebook.select(0)
+        self._log(f"[Source] {src_folder}  ({len(src_files)}개)\n")
+        for f in src_files:
+            self._log(f"    - {f}\n")
+        self._refresh_mapping_label()
+
+    def _select_target_folder(self):
+        global dst_folder, dst_files
+        path = filedialog.askdirectory(title="Target 폴더 선택 (폴더 내 모든 PDF 사용)")
+        if not path:
+            return
+        dst_folder = path
+        dst_files = sorted(_list_pdfs(path))
+        self.lbl_dst.config(
+            text=f"{os.path.basename(dst_folder)}  ({len(dst_files)}개)", fg="#a6adc8"
+        )
+        self._update_listbox(self.list_dst, dst_files)
+        self.notebook.select(1)
+        self._log(f"[Target] {dst_folder}  ({len(dst_files)}개)\n")
+        for f in dst_files:
             self._log(f"    - {f}\n")
         self._refresh_mapping_label()
 
