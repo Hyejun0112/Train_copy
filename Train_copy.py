@@ -587,6 +587,8 @@ class App(tk.Tk):
         self._update_listbox(self.list_src, src_files)
         self.notebook.select(0)
         self._log(f"[Source] {path}  ({len(src_files)}개)\n")
+        for f in src_files:
+            self._log(f"    - {f}\n")
         self._refresh_mapping_label()
 
     def _select_target(self):
@@ -602,6 +604,8 @@ class App(tk.Tk):
         self._update_listbox(self.list_dst, dst_files)
         self.notebook.select(1)
         self._log(f"[Target] {path}  ({len(dst_files)}개)\n")
+        for f in dst_files:
+            self._log(f"    - {f}\n")
         self._refresh_mapping_label()
 
     def _select_output(self):
