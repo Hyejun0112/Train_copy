@@ -155,7 +155,7 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
             elif not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
                 return False
         else:
-            if not _close(colors.get("stroke")):
+            if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
                 return False
 
     if author:
@@ -184,51 +184,12 @@ def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=
     doc = fitz.open(src_path)
     kept, removed = 0, 0
     for page in doc:
-        # 병합(그룹)된 마크업은 "IRT"(In-Reply-To)로 서로 연결되어 있음.
-        # 그룹 내 어느 하나라도 필터 조건에 맞으면 그룹 전체를 유지한다
-        # (그룹의 일부만 삭제하면 병합이 깨지고 텍스트 라벨이 누락될 수 있음)
-        groups = {}  # root_xref -> set(xrefs)
-        owner = {}   # xref -> root_xref
-        match = {}   # xref -> bool
-
-        def _find(x):
-            while owner.get(x, x) != x:
-                x = owner[x]
-            return x
-
-        for annot in page.annots() or []:
-            xref = annot.xref
-            owner.setdefault(xref, xref)
-            match[xref] = _annot_matches_filter(annot, color_hex, date_from, date_to, author)
-
-            irt = None
-            try:
-                kind, val = page.parent.xref_get_key(xref, "IRT")
-                if kind == "xref":
-                    irt = int(val.split()[0])
-            except Exception:
-                irt = None
-
-            if irt is not None:
-                owner.setdefault(irt, irt)
-                r1, r2 = _find(xref), _find(irt)
-                if r1 != r2:
-                    owner[r1] = r2
-
-        for xref in match:
-            groups.setdefault(_find(xref), set()).add(xref)
-
-        keep_xrefs = set()
-        for members in groups.values():
-            if any(match[x] for x in members):
-                keep_xrefs |= members
-
         # 삭제할 annot의 xref를 하나씩 찾아 삭제 -> 매번 처음부터 다시 스캔
         # (delete_annot 호출 후에는 기존에 모아둔 annot/xref가 무효화될 수 있음)
         while True:
             target_xref = None
             for annot in page.annots() or []:
-                if annot.xref in keep_xrefs:
+                if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
                     continue
                 target_xref = annot.xref
                 break
