@@ -69,7 +69,7 @@ class StoppedError(Exception):
     pass
 
 
-def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None, pause_fn=None):
+def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None):
     """
     1) src 열기 → 마크업 전체 복사
     2) src 닫기
@@ -119,13 +119,6 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None, pau
 
     pyautogui.hotkey('ctrl', 'shift', 'v')   # Paste in Place
     time.sleep(WAIT_PASTE)
-
-    # ── 붙여넣은 마크업 위치가 도면마다 다를 수 있으므로
-    #    사용자가 화살표 키 등으로 직접 위치를 맞출 시간을 줌
-    if pause_fn:
-        log("  ↳ 위치 확인/조정 후 '계속'을 눌러주세요\n")
-        pause_fn()
-        check_stop()
 
     pyautogui.hotkey('ctrl', 's')            # Save (덮어쓰기)
     time.sleep(2.0)
@@ -257,15 +250,6 @@ class App(tk.Tk):
                   command=self._stop,
                   **self._bkw("#f38ba8", fg="#1e1e2e")
                   ).grid(row=0, column=2, sticky="ew", padx=2)
-
-        self.var_manual_adjust = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            left, text="붙여넣기 후 위치 수동 조정 (계속 버튼으로 진행)",
-            variable=self.var_manual_adjust,
-            font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e",
-            selectcolor="#313244", activebackground="#1e1e2e",
-            activeforeground="#cdd6f4"
-        ).grid(row=7, column=0, sticky="w", pady=(2, 0))
 
         self.lbl_mapping = tk.Label(
             left, text="매핑: 0 쌍",
@@ -557,16 +541,13 @@ class App(tk.Tk):
 
             out_path = os.path.join(output_folder, dst)
 
-            pause_fn = self._wait_for_continue if self.var_manual_adjust.get() else None
-
             try:
                 process_pair(
                     src=os.path.join(src_folder, src),
                     dst=os.path.join(dst_folder, dst),
                     out=out_path,
                     log_fn=self._log,
-                    stop_check=lambda: stop_flag,
-                    pause_fn=pause_fn
+                    stop_check=lambda: stop_flag
                 )
             except StoppedError:
                 close_pdf_discard()
@@ -605,48 +586,6 @@ class App(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
-
-    def _wait_for_continue(self):
-        """워커 스레드를 멈추고, 사용자가 Bluebeam에서 마크업 위치를
-        직접 조정한 뒤 '계속' 버튼을 누를 때까지 대기한다."""
-        event = threading.Event()
-
-        def _show():
-            win = tk.Toplevel(self)
-            win.title("위치 확인")
-            win.attributes("-topmost", True)
-            win.configure(bg="#1e1e2e")
-            win.resizable(False, False)
-
-            tk.Label(
-                win,
-                text="Bluebeam에서 붙여넣은 마크업 위치를 확인/조정한 뒤\n'계속'을 눌러주세요.",
-                font=("Segoe UI", 10), fg="#cdd6f4", bg="#1e1e2e",
-                justify="left", padx=16, pady=12
-            ).pack()
-
-            btn_frm = tk.Frame(win, bg="#1e1e2e")
-            btn_frm.pack(pady=(0, 12))
-
-            def _continue():
-                win.destroy()
-                event.set()
-
-            def _skip():
-                global stop_flag
-                stop_flag = True
-                win.destroy()
-                event.set()
-
-            tk.Button(btn_frm, text="✔ 계속", command=_continue,
-                      **self._bkw("#a6e3a1", fg="#1e1e2e", bold=True)
-                      ).pack(side="left", padx=6)
-            tk.Button(btn_frm, text="⏹ 중지", command=_skip,
-                      **self._bkw("#f38ba8", fg="#1e1e2e")
-                      ).pack(side="left", padx=6)
-
-        self.after(0, _show)
-        event.wait()
 
     def _set_status(self, msg: str, color: str = "#a6adc8"):
         self.after(0, lambda: self.lbl_status.config(text=msg, fg=color))
