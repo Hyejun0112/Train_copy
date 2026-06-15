@@ -31,8 +31,7 @@ stop_flag     = False
 # 마크업 필터 설정
 filter_enabled   = False
 filter_color     = ""   # RGB hex, 예: "0000FF"
-filter_date_from = ""   # "YYYY-MM-DD"
-filter_date_to   = ""   # "YYYY-MM-DD"
+filter_date_limit = ""  # "YYYY-MM-DD" (이 날짜까지 작성된 마크업만 포함)
 filter_author    = ""   # 작성자(사번)
 
 
@@ -110,6 +109,21 @@ def _parse_pdf_date(date_str):
     return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
 
 
+def _normalize_date_input(date_str):
+    """사용자 입력 날짜를 'YYYY-MM-DD'로 정규화 (2026.05.08, 2026/5/8 등 허용, 실패 시 "")"""
+    s = (date_str or "").strip()
+    if not s:
+        return ""
+    parts = s.replace(".", "-").replace("/", "-").split("-")
+    if len(parts) != 3:
+        return ""
+    try:
+        y, m, d = (int(p) for p in parts)
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except ValueError:
+        return ""
+
+
 def _get_font_color(annot):
     """FreeText(텍스트) 마크업의 글꼴 색상을 /DA 문자열에서 추출 (RGB 0~1 튜플, 실패 시 None)"""
     try:
@@ -134,7 +148,7 @@ def _get_font_color(annot):
     return None
 
 
-def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
+def _annot_matches_filter(annot, color_hex, date_limit, author):
     """주어진 조건을 모두 만족해야 True (조건이 비어있으면 해당 항목은 통과)"""
     if color_hex:
         colors = annot.colors or {}
@@ -166,19 +180,18 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
         if annot_author.lower() != author.strip().lower():
             return False
 
-    if date_from or date_to:
-        d = _parse_pdf_date(annot.info.get("modDate") or annot.info.get("creationDate"))
+    if date_limit:
+        # 마크업이 "작성된" 날짜(creationDate) 기준, 없으면 수정일(modDate)로 대체
+        d = _parse_pdf_date(annot.info.get("creationDate") or annot.info.get("modDate"))
         if d is None:
             return False
-        if date_from and d < date_from:
-            return False
-        if date_to and d > date_to:
+        if d > date_limit:
             return False
 
     return True
 
 
-def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=None):
+def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
     """필터 조건에 맞지 않는 마크업(annotation)을 제거한 임시 PDF를 만들어
     그 경로를 반환한다. fitz(PyMuPDF)가 없으면 RuntimeError."""
     if fitz is None:
@@ -192,7 +205,7 @@ def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=
         while True:
             target_xref = None
             for annot in page.annots() or []:
-                if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
+                if _annot_matches_filter(annot, color_hex, date_limit, author):
                     continue
                 target_xref = annot.xref
                 break
@@ -249,8 +262,7 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
         open_src = build_filtered_copy(
             src,
             filter_settings.get("color", ""),
-            filter_settings.get("date_from", ""),
-            filter_settings.get("date_to", ""),
+            filter_settings.get("date_limit", ""),
             filter_settings.get("author", ""),
             log_fn=log,
         )
@@ -468,19 +480,18 @@ class App(tk.Tk):
             e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
             return e
 
-        self.ent_date_from = _entry_row(1, "기간 시작")
-        self.ent_date_to   = _entry_row(2, "기간 종료")
-        self.ent_author    = _entry_row(3, "작성자(사번)")
+        self.ent_date_limit = _entry_row(1, "기준 날짜")
+        self.ent_author     = _entry_row(2, "작성자(사번)")
 
         tk.Label(
             frm,
-            text="※ 기간: YYYY-MM-DD 형식 (마크업 작성/수정일 기준)\n"
+            text="※ 기준 날짜: YYYY-MM-DD (예: 2026-05-08)\n"
+                 "   이 날짜까지 작성된 마크업만 Target에 붙여넣습니다.\n"
                  "   작성자: 마크업 작성자(사번)와 정확히 일치해야 함\n"
-                 "   조건을 만족하는 마크업만 Target에 붙여넣습니다.\n"
                  "   (비워두면 해당 조건은 무시)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
@@ -796,7 +807,7 @@ class App(tk.Tk):
 
     def _start_run(self):
         global stop_flag, filter_enabled, filter_color
-        global filter_date_from, filter_date_to, filter_author
+        global filter_date_limit, filter_author
         if not mapping:
             messagebox.showwarning("매핑 없음", "먼저 '매핑 편집'에서 확정하세요.")
             return
@@ -806,8 +817,7 @@ class App(tk.Tk):
 
         filter_enabled   = self.var_filter_enabled.get()
         filter_color     = ""
-        filter_date_from = self.ent_date_from.get().strip()
-        filter_date_to   = self.ent_date_to.get().strip()
+        filter_date_limit = _normalize_date_input(self.ent_date_limit.get())
         filter_author    = self.ent_author.get().strip()
 
         if filter_enabled:
@@ -846,8 +856,7 @@ class App(tk.Tk):
             if filter_enabled:
                 filter_settings = dict(
                     color=filter_color,
-                    date_from=filter_date_from,
-                    date_to=filter_date_to,
+                    date_limit=filter_date_limit,
                     author=filter_author,
                 )
 
