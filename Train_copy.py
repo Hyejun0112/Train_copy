@@ -206,7 +206,7 @@ def _annot_matches_filter(annot, color_hex, date_limit, author):
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
-        if author.strip().lower() not in annot_author.lower():
+        if annot_author.lower() != author.strip().lower():
             return False
 
     if date_limit:
