@@ -206,7 +206,7 @@ def _annot_matches_filter(annot, color_hex, date_limit, author):
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
-        if annot_author.lower() != author.strip().lower():
+        if author.strip().lower() not in annot_author.lower():
             return False
 
     if date_limit:
@@ -228,7 +228,13 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 
     doc = fitz.open(src_path)
     kept, removed = 0, 0
+    authors_seen = set()
     for page in doc:
+        for annot in page.annots() or []:
+            a = (annot.info.get("title") or "").strip()
+            if a:
+                authors_seen.add(a)
+
         # 삭제할 annot의 xref를 하나씩 찾아 삭제 -> 매번 처음부터 다시 스캔
         # (delete_annot 호출 후에는 기존에 모아둔 annot/xref가 무효화될 수 있음)
         while True:
@@ -251,6 +257,8 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 
     if log_fn:
         log_fn(f"  [필터] 유지 {kept}개 / 제외 {removed}개\n")
+        if author:
+            log_fn(f"  [필터] 발견된 작성자 목록: {sorted(authors_seen)}\n")
 
     fd, tmp_path = tempfile.mkstemp(
         suffix=".pdf", prefix="_filtered_", dir=tempfile.gettempdir()
