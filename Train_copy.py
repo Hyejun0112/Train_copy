@@ -129,12 +129,15 @@ def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=
     doc = fitz.open(src_path)
     kept, removed = 0, 0
     for page in doc:
-        for annot in list(page.annots() or []):
+        annot = page.first_annot
+        while annot:
+            nxt = annot.next   # delete_annot invalidates annot, so grab next first
             if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
                 kept += 1
             else:
                 page.delete_annot(annot)
                 removed += 1
+            annot = nxt
 
     if log_fn:
         log_fn(f"  [필터] 유지 {kept}개 / 제외 {removed}개\n")
@@ -472,7 +475,8 @@ class App(tk.Tk):
             selectbackground="#45475a",
             font=("Consolas", 8),
             bd=0, highlightthickness=0,
-            activestyle="none"
+            activestyle="none",
+            selectmode="extended"
         )
         lb.grid(row=0, column=0, sticky="nsew")
 
@@ -618,15 +622,22 @@ class App(tk.Tk):
         if not src_files or not dst_files:
             messagebox.showwarning("폴더 미설정", "Source / Target 폴더를 먼저 선택하세요.")
             return
-        if len(src_files) != len(dst_files):
+
+        # Source/Target 탭에서 파일을 선택해두면 그 파일들로만 매핑
+        sel_src = [src_files[i] for i in self.list_src.curselection()]
+        sel_dst = [dst_files[i] for i in self.list_dst.curselection()]
+        use_src = sel_src or src_files
+        use_dst = sel_dst or dst_files
+
+        if len(use_src) != len(use_dst):
             messagebox.showwarning(
                 "파일 수 불일치",
-                f"Source {len(src_files)}개 ≠ Target {len(dst_files)}개\n"
+                f"Source {len(use_src)}개 ≠ Target {len(use_dst)}개\n"
                 "매핑 창에서 직접 삭제/조정하세요."
             )
 
         if not mapping:
-            mapping = list(zip(src_files, dst_files))
+            mapping = list(zip(use_src, use_dst))
 
         win = tk.Toplevel(self)
         win.title("파일 매핑 편집")
