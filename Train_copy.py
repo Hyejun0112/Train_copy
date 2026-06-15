@@ -576,34 +576,40 @@ class App(tk.Tk):
 
     def _select_source(self):
         global src_folder, src_files
-        path = filedialog.askdirectory(title="Source 폴더 선택")
-        if not path:
+        files = filedialog.askopenfilenames(
+            title="Source 폴더 - PDF 파일 선택 (Ctrl+A로 전체 선택)",
+            filetypes=[("PDF 파일", "*.pdf")]
+        )
+        if not files:
             return
-        src_folder = path
-        src_files = sorted(_list_pdfs(path))
+        src_folder = os.path.dirname(files[0])
+        src_files = sorted(_list_pdfs(src_folder))
         self.lbl_src.config(
-            text=f"{os.path.basename(path)}  ({len(src_files)}개)", fg="#a6adc8"
+            text=f"{os.path.basename(src_folder)}  ({len(src_files)}개)", fg="#a6adc8"
         )
         self._update_listbox(self.list_src, src_files)
         self.notebook.select(0)
-        self._log(f"[Source] {path}  ({len(src_files)}개)\n")
+        self._log(f"[Source] {src_folder}  ({len(src_files)}개)\n")
         for f in src_files:
             self._log(f"    - {f}\n")
         self._refresh_mapping_label()
 
     def _select_target(self):
         global dst_folder, dst_files
-        path = filedialog.askdirectory(title="Target 폴더 선택")
-        if not path:
+        files = filedialog.askopenfilenames(
+            title="Target 폴더 - PDF 파일 선택 (Ctrl+A로 전체 선택)",
+            filetypes=[("PDF 파일", "*.pdf")]
+        )
+        if not files:
             return
-        dst_folder = path
-        dst_files = sorted(_list_pdfs(path))
+        dst_folder = os.path.dirname(files[0])
+        dst_files = sorted(_list_pdfs(dst_folder))
         self.lbl_dst.config(
-            text=f"{os.path.basename(path)}  ({len(dst_files)}개)", fg="#a6adc8"
+            text=f"{os.path.basename(dst_folder)}  ({len(dst_files)}개)", fg="#a6adc8"
         )
         self._update_listbox(self.list_dst, dst_files)
         self.notebook.select(1)
-        self._log(f"[Target] {path}  ({len(dst_files)}개)\n")
+        self._log(f"[Target] {dst_folder}  ({len(dst_files)}개)\n")
         for f in dst_files:
             self._log(f"    - {f}\n")
         self._refresh_mapping_label()
