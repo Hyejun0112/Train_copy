@@ -105,11 +105,15 @@ def _parse_pdf_date(date_str):
 def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
     """주어진 조건을 모두 만족해야 True (조건이 비어있으면 해당 항목은 통과)"""
     if color_hex:
-        stroke = (annot.colors or {}).get("stroke")
-        if not stroke:
-            return False
+        colors = annot.colors or {}
         target = tuple(int(color_hex[i:i + 2], 16) / 255 for i in (0, 2, 4))
-        if any(abs(a - b) > 0.08 for a, b in zip(stroke, target)):
+
+        def _close(c):
+            return bool(c) and len(c) == 3 and all(
+                abs(a - b) <= 0.08 for a, b in zip(c, target)
+            )
+
+        if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
             return False
 
     if author:
