@@ -21,6 +21,14 @@ dst_files     = []
 mapping       = []
 stop_flag     = False
 
+# 마크업 필터 설정
+filter_enabled   = False
+filter_color     = ""
+filter_date_from = ""
+filter_date_to   = ""
+filter_author    = ""
+markups_list_pos = None   # Bluebeam Markups List 패널 내 클릭 위치 (x, y)
+
 
 # ══════════════════════════════════════════════════════════
 #  Bluebeam 제어 유틸
@@ -69,7 +77,20 @@ class StoppedError(Exception):
     pass
 
 
-def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None):
+def select_filtered_markups(pos):
+    """Markups List 패널(pos)에서 현재 필터에 해당하는 행을 모두 선택해
+    해당 마크업을 복사한다. (Bluebeam Markups List에 필터가 이미 적용되어
+    있어야 함 — 필터 설정은 배치 시작 전에 사용자가 수동으로 1회 수행)"""
+    pyautogui.click(pos[0], pos[1])
+    time.sleep(WAIT_SHORT)
+    pyautogui.hotkey('ctrl', 'a')
+    time.sleep(WAIT_SHORT)
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(WAIT_SHORT)
+
+
+def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
+                 markup_select_fn=None):
     """
     1) src 열기 → 마크업 전체 복사
     2) src 닫기
@@ -95,10 +116,13 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None):
     open_pdf(src)
     fit_page()
     time.sleep(WAIT_SHORT)
-    pyautogui.hotkey('ctrl', 'a')
-    time.sleep(WAIT_SHORT)
-    pyautogui.hotkey('ctrl', 'c')
-    time.sleep(WAIT_SHORT)
+    if markup_select_fn:
+        markup_select_fn()
+    else:
+        pyautogui.hotkey('ctrl', 'a')
+        time.sleep(WAIT_SHORT)
+        pyautogui.hotkey('ctrl', 'c')
+        time.sleep(WAIT_SHORT)
 
     log("  [2/4] 마크업 복사 완료 → Source 닫기\n")
     close_pdf_discard()
@@ -256,6 +280,72 @@ class App(tk.Tk):
             font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e"
         )
         self.lbl_mapping.grid(row=6, column=0, sticky="w")
+
+        # 마크업 필터 섹션
+        self._sec(left, "🎯 마크업 필터 (선택)", row=7)
+        self._build_filter_section(left, row=8)
+
+    def _build_filter_section(self, parent, row: int):
+        frm = tk.Frame(parent, bg="#1e1e2e")
+        frm.grid(row=row, column=0, sticky="ew", pady=(2, 0))
+        frm.columnconfigure(1, weight=1)
+
+        self.var_filter_enabled = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            frm, text="필터 사용 (특정 마크업만 붙여넣기)",
+            variable=self.var_filter_enabled,
+            font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e",
+            selectcolor="#313244", activebackground="#1e1e2e",
+            activeforeground="#cdd6f4"
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(2, 4))
+
+        def _entry_row(r, label, width=24):
+            tk.Label(frm, text=label, font=("Segoe UI", 8),
+                     fg="#6c7086", bg="#1e1e2e", anchor="w", width=10
+                     ).grid(row=r, column=0, sticky="w")
+            e = tk.Entry(frm, width=width, bg="#181825", fg="#cdd6f4",
+                          insertbackground="#cdd6f4", relief="flat")
+            e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
+            return e
+
+        self.ent_color     = _entry_row(1, "색상")
+        self.ent_date_from = _entry_row(2, "기간 시작")
+        self.ent_date_to   = _entry_row(3, "기간 종료")
+        self.ent_author    = _entry_row(4, "작성자(사번)")
+
+        tk.Label(
+            frm,
+            text="※ 실제 필터는 Bluebeam Markups List에서 직접 설정하며,\n"
+                 "   위 값은 작업 시작 전 안내 팝업에 표시되는 참고용입니다.",
+            font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
+            justify="left", anchor="w"
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
+
+        cal_frm = tk.Frame(frm, bg="#1e1e2e")
+        cal_frm.grid(row=6, column=0, columnspan=2, sticky="ew")
+        tk.Button(cal_frm, text="📍 Markups List 위치 저장 (3초 후 마우스 위치)",
+                  command=self._calibrate_markups_pos,
+                  **self._bkw("#7f849c", pady=3)
+                  ).pack(side="left")
+        self.lbl_cal = tk.Label(
+            cal_frm, text="(미설정)", font=("Segoe UI", 8),
+            fg="#6c7086", bg="#1e1e2e"
+        )
+        self.lbl_cal.pack(side="left", padx=8)
+
+    def _calibrate_markups_pos(self):
+        global markups_list_pos
+
+        def _capture():
+            markups_list_pos = pyautogui.position()
+            self.lbl_cal.config(
+                text=f"설정됨: {markups_list_pos}", fg="#a6e3a1"
+            )
+            self._log(f"[필터] Markups List 위치 저장: {markups_list_pos}\n")
+
+        self.lbl_cal.config(text="3초 후 현재 마우스 위치 저장…", fg="#f9e2af")
+        self._log("[필터] Bluebeam Markups List 패널 안으로 마우스를 옮기세요 (3초)\n")
+        self.after(3000, _capture)
 
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
@@ -511,13 +601,41 @@ class App(tk.Tk):
     # ── 실행 / 중지 ────────────────────────────────────────
 
     def _start_run(self):
-        global stop_flag
+        global stop_flag, filter_enabled, filter_color
+        global filter_date_from, filter_date_to, filter_author
         if not mapping:
             messagebox.showwarning("매핑 없음", "먼저 '매핑 편집'에서 확정하세요.")
             return
         if not output_folder:
             messagebox.showwarning("Output 미설정", "Output 폴더를 설정하세요.")
             return
+
+        filter_enabled   = self.var_filter_enabled.get()
+        filter_color     = self.ent_color.get().strip()
+        filter_date_from = self.ent_date_from.get().strip()
+        filter_date_to   = self.ent_date_to.get().strip()
+        filter_author    = self.ent_author.get().strip()
+
+        if filter_enabled:
+            if markups_list_pos is None:
+                messagebox.showwarning(
+                    "필터 위치 미설정",
+                    "'Markups List 위치 저장' 버튼으로 위치를 먼저 설정하세요."
+                )
+                return
+            proceed = messagebox.askokcancel(
+                "마크업 필터 적용",
+                "Bluebeam Markups List에서 아래 조건으로 필터를 직접 설정한 뒤 "
+                "[확인]을 누르세요.\n\n"
+                f"  • 색상: {filter_color or '(전체)'}\n"
+                f"  • 기간: {filter_date_from or '(시작 미지정)'} ~ "
+                f"{filter_date_to or '(종료 미지정)'}\n"
+                f"  • 작성자(사번): {filter_author or '(전체)'}\n\n"
+                "필터는 작업 중 모든 도면에 동일하게 적용됩니다."
+            )
+            if not proceed:
+                return
+
         stop_flag = False
         self._set_status("실행 중…", "#a6e3a1")
         self.progress["maximum"] = len(mapping)
@@ -541,13 +659,18 @@ class App(tk.Tk):
 
             out_path = os.path.join(output_folder, dst)
 
+            select_fn = None
+            if filter_enabled and markups_list_pos:
+                select_fn = lambda: select_filtered_markups(markups_list_pos)
+
             try:
                 process_pair(
                     src=os.path.join(src_folder, src),
                     dst=os.path.join(dst_folder, dst),
                     out=out_path,
                     log_fn=self._log,
-                    stop_check=lambda: stop_flag
+                    stop_check=lambda: stop_flag,
+                    markup_select_fn=select_fn
                 )
             except StoppedError:
                 close_pdf_discard()
