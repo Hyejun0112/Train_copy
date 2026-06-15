@@ -1,11 +1,17 @@
 import os
 import shutil
+import tempfile
 import time
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import pyautogui
 import pygetwindow as gw
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 
 # ── 전역 설정 ──────────────────────────────────────────────
 WAIT_OPEN  = 5
@@ -23,11 +29,11 @@ stop_flag     = False
 
 # 마크업 필터 설정
 filter_enabled   = False
-filter_color     = ""
-filter_date_from = ""
-filter_date_to   = ""
-filter_author    = ""
-markups_list_pos = None   # Bluebeam Markups List 패널 내 클릭 위치 (x, y)
+filter_color     = ""   # RGB hex, 예: "0000FF"
+filter_date_from = ""   # "YYYY-MM-DD"
+filter_date_to   = ""   # "YYYY-MM-DD"
+filter_author    = ""   # 작성자(사번)
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -77,20 +83,73 @@ class StoppedError(Exception):
     pass
 
 
-def select_filtered_markups(pos):
-    """Markups List 패널(pos)에서 현재 필터에 해당하는 행을 모두 선택해
-    해당 마크업을 복사한다. (Bluebeam Markups List에 필터가 이미 적용되어
-    있어야 함 — 필터 설정은 배치 시작 전에 사용자가 수동으로 1회 수행)"""
-    pyautogui.click(pos[0], pos[1])
-    time.sleep(WAIT_SHORT)
-    pyautogui.hotkey('ctrl', 'a')
-    time.sleep(WAIT_SHORT)
-    pyautogui.hotkey('ctrl', 'c')
-    time.sleep(WAIT_SHORT)
+def _parse_pdf_date(date_str):
+    """PDF 날짜 형식 'D:YYYYMMDDHHMMSS...' → 'YYYY-MM-DD' (실패 시 None)"""
+    if not date_str:
+        return None
+    s = date_str.lstrip("D:")
+    if len(s) < 8:
+        return None
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
+    """주어진 조건을 모두 만족해야 True (조건이 비어있으면 해당 항목은 통과)"""
+    if color_hex:
+        stroke = (annot.colors or {}).get("stroke")
+        if not stroke:
+            return False
+        target = tuple(int(color_hex[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        if any(abs(a - b) > 0.08 for a, b in zip(stroke, target)):
+            return False
+
+    if author:
+        annot_author = (annot.info.get("title") or "").strip()
+        if annot_author.lower() != author.strip().lower():
+            return False
+
+    if date_from or date_to:
+        d = _parse_pdf_date(annot.info.get("modDate") or annot.info.get("creationDate"))
+        if d is None:
+            return False
+        if date_from and d < date_from:
+            return False
+        if date_to and d > date_to:
+            return False
+
+    return True
+
+
+def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=None):
+    """필터 조건에 맞지 않는 마크업(annotation)을 제거한 임시 PDF를 만들어
+    그 경로를 반환한다. fitz(PyMuPDF)가 없으면 RuntimeError."""
+    if fitz is None:
+        raise RuntimeError("PyMuPDF(fitz)가 설치되어 있지 않습니다. 'pip install PyMuPDF' 필요")
+
+    doc = fitz.open(src_path)
+    kept, removed = 0, 0
+    for page in doc:
+        for annot in list(page.annots() or []):
+            if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
+                kept += 1
+            else:
+                page.delete_annot(annot)
+                removed += 1
+
+    if log_fn:
+        log_fn(f"  [필터] 유지 {kept}개 / 제외 {removed}개\n")
+
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".pdf", prefix="_filtered_", dir=os.path.dirname(src_path) or None
+    )
+    os.close(fd)
+    doc.save(tmp_path)
+    doc.close()
+    return tmp_path
 
 
 def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
-                 markup_select_fn=None):
+                 filter_settings=None):
     """
     1) src 열기 → 마크업 전체 복사
     2) src 닫기
@@ -112,20 +171,37 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
 
     # ── 1) Source 열기 → 복사
     check_stop()
+
+    open_src = src
+    if filter_settings:
+        log("  [필터] 마크업 필터 적용 중…\n")
+        open_src = build_filtered_copy(
+            src,
+            filter_settings.get("color", ""),
+            filter_settings.get("date_from", ""),
+            filter_settings.get("date_to", ""),
+            filter_settings.get("author", ""),
+            log_fn=log,
+        )
+
     log(f"  [1/4] Source 열기: {os.path.basename(src)}\n")
-    open_pdf(src)
+    open_pdf(open_src)
     fit_page()
     time.sleep(WAIT_SHORT)
-    if markup_select_fn:
-        markup_select_fn()
-    else:
-        pyautogui.hotkey('ctrl', 'a')
-        time.sleep(WAIT_SHORT)
-        pyautogui.hotkey('ctrl', 'c')
-        time.sleep(WAIT_SHORT)
+    pyautogui.hotkey('ctrl', 'a')
+    time.sleep(WAIT_SHORT)
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(WAIT_SHORT)
 
     log("  [2/4] 마크업 복사 완료 → Source 닫기\n")
     close_pdf_discard()
+
+    if open_src != src:
+        try:
+            os.remove(open_src)
+        except OSError:
+            pass
+
     check_stop()
 
     # ── 2) Target → Output 폴더에 미리 복사 (shutil 직접 복사)
@@ -308,44 +384,20 @@ class App(tk.Tk):
             e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
             return e
 
-        self.ent_color     = _entry_row(1, "색상")
+        self.ent_color     = _entry_row(1, "색상 (RGB hex)")
         self.ent_date_from = _entry_row(2, "기간 시작")
         self.ent_date_to   = _entry_row(3, "기간 종료")
         self.ent_author    = _entry_row(4, "작성자(사번)")
 
         tk.Label(
             frm,
-            text="※ 실제 필터는 Bluebeam Markups List에서 직접 설정하며,\n"
-                 "   위 값은 작업 시작 전 안내 팝업에 표시되는 참고용입니다.",
+            text="※ 색상: RGB hex 6자리 (예: 0000FF = 파란색)\n"
+                 "   기간: YYYY-MM-DD 형식\n"
+                 "   조건을 만족하는 마크업만 Target에 붙여넣습니다.\n"
+                 "   (비워두면 해당 조건은 무시)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
-
-        cal_frm = tk.Frame(frm, bg="#1e1e2e")
-        cal_frm.grid(row=6, column=0, columnspan=2, sticky="ew")
-        tk.Button(cal_frm, text="📍 Markups List 위치 저장 (3초 후 마우스 위치)",
-                  command=self._calibrate_markups_pos,
-                  **self._bkw("#7f849c", pady=3)
-                  ).pack(side="left")
-        self.lbl_cal = tk.Label(
-            cal_frm, text="(미설정)", font=("Segoe UI", 8),
-            fg="#6c7086", bg="#1e1e2e"
-        )
-        self.lbl_cal.pack(side="left", padx=8)
-
-    def _calibrate_markups_pos(self):
-        global markups_list_pos
-
-        def _capture():
-            markups_list_pos = pyautogui.position()
-            self.lbl_cal.config(
-                text=f"설정됨: {markups_list_pos}", fg="#a6e3a1"
-            )
-            self._log(f"[필터] Markups List 위치 저장: {markups_list_pos}\n")
-
-        self.lbl_cal.config(text="3초 후 현재 마우스 위치 저장…", fg="#f9e2af")
-        self._log("[필터] Bluebeam Markups List 패널 안으로 마우스를 옮기세요 (3초)\n")
-        self.after(3000, _capture)
 
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
@@ -611,29 +663,24 @@ class App(tk.Tk):
             return
 
         filter_enabled   = self.var_filter_enabled.get()
-        filter_color     = self.ent_color.get().strip()
+        filter_color     = self.ent_color.get().strip().lstrip("#").upper()
         filter_date_from = self.ent_date_from.get().strip()
         filter_date_to   = self.ent_date_to.get().strip()
         filter_author    = self.ent_author.get().strip()
 
         if filter_enabled:
-            if markups_list_pos is None:
-                messagebox.showwarning(
-                    "필터 위치 미설정",
-                    "'Markups List 위치 저장' 버튼으로 위치를 먼저 설정하세요."
+            if fitz is None:
+                messagebox.showerror(
+                    "PyMuPDF 필요",
+                    "마크업 필터 기능에는 PyMuPDF가 필요합니다.\n"
+                    "터미널에서 'pip install PyMuPDF' 실행 후 다시 시도하세요."
                 )
                 return
-            proceed = messagebox.askokcancel(
-                "마크업 필터 적용",
-                "Bluebeam Markups List에서 아래 조건으로 필터를 직접 설정한 뒤 "
-                "[확인]을 누르세요.\n\n"
-                f"  • 색상: {filter_color or '(전체)'}\n"
-                f"  • 기간: {filter_date_from or '(시작 미지정)'} ~ "
-                f"{filter_date_to or '(종료 미지정)'}\n"
-                f"  • 작성자(사번): {filter_author or '(전체)'}\n\n"
-                "필터는 작업 중 모든 도면에 동일하게 적용됩니다."
-            )
-            if not proceed:
+            if filter_color and (len(filter_color) != 6 or
+                                  any(c not in "0123456789ABCDEF" for c in filter_color)):
+                messagebox.showwarning(
+                    "색상 형식 오류", "색상은 RGB hex 6자리로 입력하세요 (예: 0000FF)."
+                )
                 return
 
         stop_flag = False
@@ -659,9 +706,14 @@ class App(tk.Tk):
 
             out_path = os.path.join(output_folder, dst)
 
-            select_fn = None
-            if filter_enabled and markups_list_pos:
-                select_fn = lambda: select_filtered_markups(markups_list_pos)
+            filter_settings = None
+            if filter_enabled:
+                filter_settings = dict(
+                    color=filter_color,
+                    date_from=filter_date_from,
+                    date_to=filter_date_to,
+                    author=filter_author,
+                )
 
             try:
                 process_pair(
@@ -670,7 +722,7 @@ class App(tk.Tk):
                     out=out_path,
                     log_fn=self._log,
                     stop_check=lambda: stop_flag,
-                    markup_select_fn=select_fn
+                    filter_settings=filter_settings
                 )
             except StoppedError:
                 close_pdf_discard()
