@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+import traceback
 import time
 import threading
 import tkinter as tk
@@ -625,7 +626,9 @@ class App(tk.Tk):
         self.lbl_out.config(text=os.path.basename(path), fg="#a6adc8")
         self._update_listbox(self.list_out, out_files)
         self.notebook.select(2)
-        self._log(f"[Output] {path}\n")
+        self._log(f"[Output] {path}  ({len(out_files)}개)\n")
+        for f in out_files:
+            self._log(f"    - {f}\n")
 
     def _update_listbox(self, lb: tk.Listbox, files: list):
         lb.delete(0, "end")
@@ -816,8 +819,8 @@ class App(tk.Tk):
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
                 self._set_status("중지됨", "#f38ba8")
                 return
-            except Exception as e:
-                self._log(f"  ⚠ 오류: {e}\n")
+            except Exception:
+                self._log(f"  ⚠ 오류:\n{traceback.format_exc()}\n")
 
             self.progress["value"] = i
 
