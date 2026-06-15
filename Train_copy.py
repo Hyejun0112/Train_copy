@@ -145,9 +145,6 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
                 abs(a - b) <= 0.15 for a, b in zip(c, target)
             )
 
-        def _has_color(c):
-            return bool(c) and len(c) == 3
-
         # FreeText(텍스트) 마크업: "글꼴 색상" 기준
         # 그 외 마크업: "색" (테두리/기본색, stroke) 기준
         if annot.type[1] == "FreeText":
@@ -155,15 +152,12 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
             if font_color is not None:
                 if not _close(font_color):
                     return False
-            elif _has_color(colors.get("stroke")) or _has_color(colors.get("fill")):
+            else:
                 if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
                     return False
-            # 색 정보가 전혀 없으면(색을 알 수 없으면) 색 조건은 통과시킨다
         else:
-            if _has_color(colors.get("stroke")) or _has_color(colors.get("fill")):
-                if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
-                    return False
-            # 색 정보가 전혀 없으면(색을 알 수 없으면) 색 조건은 통과시킨다
+            if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
+                return False
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
