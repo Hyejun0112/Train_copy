@@ -405,12 +405,20 @@ class App(tk.Tk):
             justify="left", anchor="w"
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
-    # Bluebeam Revu 마크업 색상 팔레트 (RGB hex)
+    # Bluebeam Revu 마크업 색상 팔레트 (RGB hex) — 10열 x 4행
     BLUEBEAM_PALETTE = [
-        "FF0000", "FFFF00", "00FF00", "00FFFF",
-        "0000FF", "FF00FF", "FFFFFF", "000000",
-        "FFA500", "808080", "800000", "808000",
-        "008000", "008080", "000080", "800080",
+        # 파스텔
+        "FFCCCC", "FFE5CC", "FFFFCC", "CCFFCC", "CCFFFF",
+        "CCE5FF", "CCCCFF", "E5CCFF", "FFCCFF", "FFCCE5",
+        # 기본(밝은) 색
+        "FF0000", "FF8000", "FFFF00", "00FF00", "00FFFF",
+        "0080FF", "0000FF", "8000FF", "FF00FF", "FF0080",
+        # 진한(어두운) 색
+        "800000", "804000", "808000", "008000", "008080",
+        "004080", "000080", "400080", "800080", "800040",
+        # 그레이스케일
+        "000000", "333333", "666666", "999999", "BBBBBB",
+        "CCCCCC", "DDDDDD", "EEEEEE", "F5F5F5", "FFFFFF",
     ]
 
     def _build_color_palette(self, parent):
@@ -431,7 +439,7 @@ class App(tk.Tk):
                 text=f"선택됨: #{new_val}" if new_val else "선택됨: (전체)"
             )
 
-        cols = 8
+        cols = 10
         for i, hex_color in enumerate(self.BLUEBEAM_PALETTE):
             r, c = divmod(i, cols)
             btn = tk.Button(
