@@ -91,6 +91,35 @@ def close_pdf_discard():
         time.sleep(WAIT_SHORT)
 
 
+def close_bluebeam_app():
+    """현재 Bluebeam 창을 완전히 종료한다.
+    - 전체화면 상태로 남아 응답 없음(렉)이 발생하는 것을 방지하기 위해 먼저 Escape로 빠져나옴
+    - 작업이 끝난 PDF 창이 계속 쌓이지 않도록 Alt+F4로 앱 전체를 닫음"""
+    pyautogui.press('escape')
+    time.sleep(WAIT_SHORT)
+
+    wins = gw.getWindowsWithTitle("Bluebeam")
+    if not wins:
+        return
+    try:
+        wins[0].activate()
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+    pyautogui.hotkey('alt', 'f4')
+    time.sleep(WAIT_SHORT)
+
+    try:
+        active = gw.getActiveWindow()
+        title = (active.title if active else "") or ""
+    except Exception:
+        title = ""
+    if title and "Bluebeam" not in title:
+        pyautogui.press('n')
+        time.sleep(WAIT_SHORT)
+
+
 # ══════════════════════════════════════════════════════════
 #  핵심 작업 로직
 # ══════════════════════════════════════════════════════════
@@ -319,7 +348,7 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     pyautogui.press('enter')                 # 덮어쓰기 확인 팝업 대비
     time.sleep(1.0)
 
-    close_pdf_discard()
+    close_bluebeam_app()
     log("  ✓ 완료\n")
 
 
