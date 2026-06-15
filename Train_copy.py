@@ -259,6 +259,17 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     time.sleep(WAIT_SHORT)
     pyautogui.hotkey('ctrl', 'a')
     time.sleep(WAIT_SHORT)
+
+    if filter_settings:
+        # 병합(그룹)된 마크업은 일부만 필터에 걸려 잘리면 글자/도형이 누락될 수 있음
+        # -> 복사 전에 전체 선택 상태에서 그룹을 해제(Ctrl+Shift+G)하여
+        #    각 마크업을 독립 객체로 만든 뒤 다시 전체 선택해서 복사
+        log("  [필터] 병합 마크업 그룹 해제 중…\n")
+        pyautogui.hotkey('ctrl', 'shift', 'g')
+        time.sleep(WAIT_SHORT)
+        pyautogui.hotkey('ctrl', 'a')
+        time.sleep(WAIT_SHORT)
+
     pyautogui.hotkey('ctrl', 'c')
     time.sleep(WAIT_SHORT)
 
