@@ -1,4 +1,5 @@
 import os
+import csv
 import shutil
 import tempfile
 import traceback
@@ -266,7 +267,7 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
     os.close(fd)
     doc.save(tmp_path)
     doc.close()
-    return tmp_path
+    return tmp_path, kept, removed
 
 
 def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
@@ -294,9 +295,10 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     check_stop()
 
     open_src = src
+    filter_kept, filter_removed = None, None
     if filter_settings:
         log("  [필터] 마크업 필터 적용 중…\n")
-        open_src = build_filtered_copy(
+        open_src, filter_kept, filter_removed = build_filtered_copy(
             src,
             filter_settings.get("color", ""),
             filter_settings.get("date_limit", ""),
@@ -358,6 +360,7 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
 
     close_bluebeam_app()
     log("  ✓ 완료\n")
+    return {"filter_kept": filter_kept, "filter_removed": filter_removed}
 
 
 # ══════════════════════════════════════════════════════════
@@ -878,6 +881,7 @@ class App(tk.Tk):
         self._set_status("중지 요청됨…", "#f9e2af")
 
     def _run_worker(self):
+        report_rows = []
         for i, (src, dst) in enumerate(mapping, 1):
             if stop_flag:
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
@@ -897,8 +901,9 @@ class App(tk.Tk):
                     author=filter_author,
                 )
 
+            start_time = time.time()
             try:
-                process_pair(
+                result = process_pair(
                     src=os.path.join(src_folder, src),
                     dst=os.path.join(dst_folder, dst),
                     out=out_path,
@@ -906,13 +911,36 @@ class App(tk.Tk):
                     stop_check=lambda: stop_flag,
                     filter_settings=filter_settings
                 )
+                elapsed = time.time() - start_time
+                report_rows.append({
+                    "source": src,
+                    "target": dst,
+                    "output": dst,
+                    "status": "완료",
+                    "filter_kept": result.get("filter_kept"),
+                    "filter_removed": result.get("filter_removed"),
+                    "elapsed_sec": round(elapsed, 1),
+                    "error": "",
+                })
             except StoppedError:
                 close_pdf_discard()
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
                 self._set_status("중지됨", "#f38ba8")
+                self._write_report(report_rows)
                 return
             except Exception:
-                self._log(f"  ⚠ 오류:\n{traceback.format_exc()}\n")
+                err = traceback.format_exc()
+                self._log(f"  ⚠ 오류:\n{err}\n")
+                report_rows.append({
+                    "source": src,
+                    "target": dst,
+                    "output": dst,
+                    "status": "오류",
+                    "filter_kept": "",
+                    "filter_removed": "",
+                    "elapsed_sec": round(time.time() - start_time, 1),
+                    "error": str(err).splitlines()[-1] if err else "",
+                })
 
             self.progress["value"] = i
 
@@ -920,12 +948,31 @@ class App(tk.Tk):
             out_files = sorted(_list_pdfs(output_folder))
             self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
 
+        self._write_report(report_rows)
+
         self._log("\n✅ 모든 작업 완료!\n")
         self._set_status("완료 ✅", "#a6e3a1")
 
         # 작업 완료 후 Output 폴더 자동 열기
         if output_folder:
             os.startfile(output_folder)
+
+    def _write_report(self, report_rows):
+        """처리 결과를 Output 폴더에 CSV로 저장"""
+        if not report_rows or not output_folder:
+            return
+        report_path = os.path.join(output_folder, "처리결과.csv")
+        try:
+            with open(report_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "source", "target", "output", "status",
+                    "filter_kept", "filter_removed", "elapsed_sec", "error",
+                ])
+                writer.writeheader()
+                writer.writerows(report_rows)
+            self._log(f"\n📄 처리 결과 리포트 저장: {report_path}\n")
+        except OSError:
+            self._log(f"\n⚠ 처리 결과 리포트 저장 실패: {report_path}\n")
 
     # ── 로그 헬퍼 ──────────────────────────────────────────
 
