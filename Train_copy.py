@@ -142,19 +142,25 @@ def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=
     doc = fitz.open(src_path)
     kept, removed = 0, 0
     for page in doc:
-        # 1단계: 읽기 전용으로 삭제 대상 xref만 수집 (delete 중 객체 무효화 방지)
-        delete_xrefs = []
-        for annot in page.annots() or []:
-            if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
-                kept += 1
-            else:
-                delete_xrefs.append(annot.xref)
+        # 삭제할 annot의 xref를 하나씩 찾아 삭제 -> 매번 처음부터 다시 스캔
+        # (delete_annot 호출 후에는 기존에 모아둔 annot/xref가 무효화될 수 있음)
+        while True:
+            target_xref = None
+            for annot in page.annots() or []:
+                if _annot_matches_filter(annot, color_hex, date_from, date_to, author):
+                    continue
+                target_xref = annot.xref
+                break
 
-        # 2단계: xref로 다시 로드해서 한 개씩 삭제
-        for xref in delete_xrefs:
-            annot = page.load_annot(xref)
+            if target_xref is None:
+                break
+
+            annot = page.load_annot(target_xref)
             page.delete_annot(annot)
             removed += 1
+
+        for annot in page.annots() or []:
+            kept += 1
 
     if log_fn:
         log_fn(f"  [필터] 유지 {kept}개 / 제외 {removed}개\n")
