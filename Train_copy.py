@@ -149,12 +149,14 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
         # 그 외 마크업: "색" (테두리/기본색, stroke) 기준
         if annot.type[1] == "FreeText":
             font_color = _get_font_color(annot)
-            if font_color is not None:
-                if not _close(font_color):
-                    return False
-            else:
-                if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
-                    return False
+            # 콜아웃형 FreeText는 /DA의 글꼴색이 실제 표시 색(테두리/채우기)과
+            # 다를 수 있으므로, 글꼴 색·테두리색·채우기색 중 하나라도 맞으면 통과
+            if not (
+                _close(font_color) or
+                _close(colors.get("stroke")) or
+                _close(colors.get("fill"))
+            ):
+                return False
         else:
             if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
                 return False
