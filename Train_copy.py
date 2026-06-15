@@ -35,6 +35,14 @@ filter_date_to   = ""   # "YYYY-MM-DD"
 filter_author    = ""   # 작성자(사번)
 
 
+def _list_pdfs(path: str) -> list:
+    """폴더 내 PDF 목록 (필터 작업용 임시 파일 '_filtered_*'는 제외)"""
+    return [
+        f for f in os.listdir(path)
+        if f.lower().endswith(".pdf") and not f.startswith("_filtered_")
+    ]
+
+
 
 # ══════════════════════════════════════════════════════════
 #  Bluebeam 제어 유틸
@@ -147,7 +155,7 @@ def build_filtered_copy(src_path, color_hex, date_from, date_to, author, log_fn=
         log_fn(f"  [필터] 유지 {kept}개 / 제외 {removed}개\n")
 
     fd, tmp_path = tempfile.mkstemp(
-        suffix=".pdf", prefix="_filtered_", dir=os.path.dirname(src_path) or None
+        suffix=".pdf", prefix="_filtered_", dir=tempfile.gettempdir()
     )
     os.close(fd)
     doc.save(tmp_path)
@@ -572,7 +580,7 @@ class App(tk.Tk):
         if not path:
             return
         src_folder = path
-        src_files = sorted(f for f in os.listdir(path) if f.lower().endswith(".pdf"))
+        src_files = sorted(_list_pdfs(path))
         self.lbl_src.config(
             text=f"{os.path.basename(path)}  ({len(src_files)}개)", fg="#a6adc8"
         )
@@ -587,7 +595,7 @@ class App(tk.Tk):
         if not path:
             return
         dst_folder = path
-        dst_files = sorted(f for f in os.listdir(path) if f.lower().endswith(".pdf"))
+        dst_files = sorted(_list_pdfs(path))
         self.lbl_dst.config(
             text=f"{os.path.basename(path)}  ({len(dst_files)}개)", fg="#a6adc8"
         )
@@ -603,7 +611,7 @@ class App(tk.Tk):
             return
         output_folder = path
         # Output 폴더의 기존 PDF 표시
-        out_files = sorted(f for f in os.listdir(path) if f.lower().endswith(".pdf"))
+        out_files = sorted(_list_pdfs(path))
         self.lbl_out.config(text=os.path.basename(path), fg="#a6adc8")
         self._update_listbox(self.list_out, out_files)
         self.notebook.select(2)
@@ -804,9 +812,7 @@ class App(tk.Tk):
             self.progress["value"] = i
 
             # Output 탭 목록 갱신
-            out_files = sorted(
-                f for f in os.listdir(output_folder) if f.lower().endswith(".pdf")
-            )
+            out_files = sorted(_list_pdfs(output_folder))
             self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
 
         self._log("\n✅ 모든 작업 완료!\n")
