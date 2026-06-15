@@ -102,6 +102,30 @@ def _parse_pdf_date(date_str):
     return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
 
 
+def _get_font_color(annot):
+    """FreeText(텍스트) 마크업의 글꼴 색상을 /DA 문자열에서 추출 (RGB 0~1 튜플, 실패 시 None)"""
+    try:
+        da = annot.parent.xref_get_key(annot.xref, "DA")
+    except Exception:
+        return None
+    if not da or da[0] != "string":
+        return None
+    parts = da[1].split()
+    for i, tok in enumerate(parts):
+        if tok == "rg" and i >= 3:
+            try:
+                return tuple(float(parts[i - 3 + j]) for j in range(3))
+            except (ValueError, IndexError):
+                return None
+        if tok == "g" and i >= 1:
+            try:
+                v = float(parts[i - 1])
+                return (v, v, v)
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
 def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
     """주어진 조건을 모두 만족해야 True (조건이 비어있으면 해당 항목은 통과)"""
     if color_hex:
@@ -113,8 +137,14 @@ def _annot_matches_filter(annot, color_hex, date_from, date_to, author):
                 abs(a - b) <= 0.08 for a, b in zip(c, target)
             )
 
-        if not (_close(colors.get("stroke")) or _close(colors.get("fill"))):
-            return False
+        # FreeText(텍스트) 마크업: "글꼴 색상" 기준
+        # 그 외 마크업: "색" (테두리/기본색, stroke) 기준
+        if annot.type[1] == "FreeText":
+            if not _close(_get_font_color(annot)):
+                return False
+        else:
+            if not _close(colors.get("stroke")):
+                return False
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
