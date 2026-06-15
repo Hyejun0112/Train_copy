@@ -384,20 +384,72 @@ class App(tk.Tk):
             e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
             return e
 
-        self.ent_color     = _entry_row(1, "색상 (RGB hex)")
+        # 색상 — Bluebeam 표준 마크업 색상 팔레트
+        tk.Label(frm, text="색상", font=("Segoe UI", 8),
+                 fg="#6c7086", bg="#1e1e2e", anchor="nw", width=10
+                 ).grid(row=1, column=0, sticky="nw")
+        self.var_filter_color = tk.StringVar(value="")
+        self._build_color_palette(frm).grid(row=1, column=1, sticky="w", pady=1)
+
         self.ent_date_from = _entry_row(2, "기간 시작")
         self.ent_date_to   = _entry_row(3, "기간 종료")
         self.ent_author    = _entry_row(4, "작성자(사번)")
 
         tk.Label(
             frm,
-            text="※ 색상: RGB hex 6자리 (예: 0000FF = 파란색)\n"
+            text="※ 색상: 아래 팔레트에서 선택 (다시 클릭하면 선택 해제)\n"
                  "   기간: YYYY-MM-DD 형식\n"
                  "   조건을 만족하는 마크업만 Target에 붙여넣습니다.\n"
                  "   (비워두면 해당 조건은 무시)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
+
+    # Bluebeam Revu 마크업 색상 팔레트 (RGB hex)
+    BLUEBEAM_PALETTE = [
+        "FF0000", "FFFF00", "00FF00", "00FFFF",
+        "0000FF", "FF00FF", "FFFFFF", "000000",
+        "FFA500", "808080", "800000", "808000",
+        "008000", "008080", "000080", "800080",
+    ]
+
+    def _build_color_palette(self, parent):
+        frm = tk.Frame(parent, bg="#1e1e2e")
+        self._palette_buttons = {}
+
+        def _select(hex_color):
+            current = self.var_filter_color.get()
+            new_val = "" if current == hex_color else hex_color
+            self.var_filter_color.set(new_val)
+            for h, btn in self._palette_buttons.items():
+                btn.configure(
+                    relief="sunken" if h == new_val else "flat",
+                    highlightbackground="#cdd6f4" if h == new_val else "#1e1e2e",
+                    highlightthickness=2 if h == new_val else 1,
+                )
+            self.lbl_color_sel.config(
+                text=f"선택됨: #{new_val}" if new_val else "선택됨: (전체)"
+            )
+
+        cols = 8
+        for i, hex_color in enumerate(self.BLUEBEAM_PALETTE):
+            r, c = divmod(i, cols)
+            btn = tk.Button(
+                frm, bg=f"#{hex_color}", width=2, height=1,
+                relief="flat", bd=0, highlightthickness=1,
+                highlightbackground="#1e1e2e",
+                command=lambda h=hex_color: _select(h)
+            )
+            btn.grid(row=r, column=c, padx=2, pady=2)
+            self._palette_buttons[hex_color] = btn
+
+        self.lbl_color_sel = tk.Label(
+            frm, text="선택됨: (전체)", font=("Segoe UI", 8),
+            fg="#a6adc8", bg="#1e1e2e", anchor="w"
+        )
+        self.lbl_color_sel.grid(row=(len(self.BLUEBEAM_PALETTE) - 1) // cols + 1,
+                                 column=0, columnspan=cols, sticky="w", pady=(2, 0))
+        return frm
 
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
@@ -663,7 +715,7 @@ class App(tk.Tk):
             return
 
         filter_enabled   = self.var_filter_enabled.get()
-        filter_color     = self.ent_color.get().strip().lstrip("#").upper()
+        filter_color     = self.var_filter_color.get().strip().lstrip("#").upper()
         filter_date_from = self.ent_date_from.get().strip()
         filter_date_to   = self.ent_date_to.get().strip()
         filter_author    = self.ent_author.get().strip()
@@ -674,12 +726,6 @@ class App(tk.Tk):
                     "PyMuPDF 필요",
                     "마크업 필터 기능에는 PyMuPDF가 필요합니다.\n"
                     "터미널에서 'pip install PyMuPDF' 실행 후 다시 시도하세요."
-                )
-                return
-            if filter_color and (len(filter_color) != 6 or
-                                  any(c not in "0123456789ABCDEF" for c in filter_color)):
-                messagebox.showwarning(
-                    "색상 형식 오류", "색상은 RGB hex 6자리로 입력하세요 (예: 0000FF)."
                 )
                 return
 
