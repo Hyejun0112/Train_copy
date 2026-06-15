@@ -468,60 +468,19 @@ class App(tk.Tk):
             e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
             return e
 
-        # 색상 — Bluebeam 표준 마크업 색상 팔레트
-        tk.Label(frm, text="색상", font=("Segoe UI", 8),
-                 fg="#6c7086", bg="#1e1e2e", anchor="nw", width=10
-                 ).grid(row=1, column=0, sticky="nw")
-        self.var_filter_color = tk.StringVar(value="")
-        self._build_color_palette(frm).grid(row=1, column=1, sticky="w", pady=1)
-
-        self.ent_date_from = _entry_row(2, "기간 시작")
-        self.ent_date_to   = _entry_row(3, "기간 종료")
-        self.ent_author    = _entry_row(4, "작성자(사번)")
+        self.ent_date_from = _entry_row(1, "기간 시작")
+        self.ent_date_to   = _entry_row(2, "기간 종료")
+        self.ent_author    = _entry_row(3, "작성자(사번)")
 
         tk.Label(
             frm,
-            text="※ 색상: 아래 팔레트에서 선택 (다시 클릭하면 선택 해제)\n"
-                 "   기간: YYYY-MM-DD 형식\n"
+            text="※ 기간: YYYY-MM-DD 형식 (마크업 작성/수정일 기준)\n"
+                 "   작성자: 마크업 작성자(사번)와 정확히 일치해야 함\n"
                  "   조건을 만족하는 마크업만 Target에 붙여넣습니다.\n"
                  "   (비워두면 해당 조건은 무시)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
-
-    # Bluebeam Revu 마크업 색상 팔레트 (RGB hex) — 10열 x 4행
-    BLUEBEAM_PALETTE = [
-        # 파스텔
-        "FFCCCC", "FFE5CC", "FFFFCC", "CCFFCC", "CCFFFF",
-        "CCE5FF", "CCCCFF", "E5CCFF", "FFCCFF", "FFCCE5",
-        # 기본(밝은) 색
-        "FF0000", "FF8000", "FFFF00", "00FF00", "00FFFF",
-        "0080FF", "0000FF", "8000FF", "FF00FF", "FF0080",
-        # 진한(어두운) 색
-        "800000", "804000", "808000", "008000", "008080",
-        "004080", "000080", "400080", "800080", "800040",
-        # 그레이스케일
-        "000000", "333333", "666666", "999999", "BBBBBB",
-        "CCCCCC", "DDDDDD", "EEEEEE", "F5F5F5", "FFFFFF",
-    ]
-
-    def _build_color_palette(self, parent):
-        frm = tk.Frame(parent, bg="#1e1e2e")
-        self._palette_buttons = {}
-
-        def _select(hex_color):
-            current = self.var_filter_color.get()
-            new_val = "" if current == hex_color else hex_color
-            self.var_filter_color.set(new_val)
-            for h, btn in self._palette_buttons.items():
-                btn.configure(
-                    relief="sunken" if h == new_val else "flat",
-                    highlightbackground="#cdd6f4" if h == new_val else "#1e1e2e",
-                    highlightthickness=2 if h == new_val else 1,
-                )
-            self.lbl_color_sel.config(
-                text=f"선택됨: #{new_val}" if new_val else "선택됨: (전체)"
-            )
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
         cols = 10
         for i, hex_color in enumerate(self.BLUEBEAM_PALETTE):
@@ -866,7 +825,7 @@ class App(tk.Tk):
             return
 
         filter_enabled   = self.var_filter_enabled.get()
-        filter_color     = self.var_filter_color.get().strip().lstrip("#").upper()
+        filter_color     = ""
         filter_date_from = self.ent_date_from.get().strip()
         filter_date_to   = self.ent_date_to.get().strip()
         filter_author    = self.ent_author.get().strip()
