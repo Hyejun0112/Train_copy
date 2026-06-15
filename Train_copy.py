@@ -583,7 +583,7 @@ class App(tk.Tk):
         if not files:
             return
         src_folder = os.path.dirname(files[0])
-        src_files = sorted(_list_pdfs(src_folder))
+        src_files = sorted(os.path.basename(f) for f in files)
         self.lbl_src.config(
             text=f"{os.path.basename(src_folder)}  ({len(src_files)}개)", fg="#a6adc8"
         )
@@ -603,7 +603,7 @@ class App(tk.Tk):
         if not files:
             return
         dst_folder = os.path.dirname(files[0])
-        dst_files = sorted(_list_pdfs(dst_folder))
+        dst_files = sorted(os.path.basename(f) for f in files)
         self.lbl_dst.config(
             text=f"{os.path.basename(dst_folder)}  ({len(dst_files)}개)", fg="#a6adc8"
         )
