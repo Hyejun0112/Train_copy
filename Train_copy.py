@@ -482,26 +482,6 @@ class App(tk.Tk):
             justify="left", anchor="w"
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
-        cols = 10
-        for i, hex_color in enumerate(self.BLUEBEAM_PALETTE):
-            r, c = divmod(i, cols)
-            btn = tk.Button(
-                frm, bg=f"#{hex_color}", width=2, height=1,
-                relief="flat", bd=0, highlightthickness=1,
-                highlightbackground="#1e1e2e",
-                command=lambda h=hex_color: _select(h)
-            )
-            btn.grid(row=r, column=c, padx=2, pady=2)
-            self._palette_buttons[hex_color] = btn
-
-        self.lbl_color_sel = tk.Label(
-            frm, text="선택됨: (전체)", font=("Segoe UI", 8),
-            fg="#a6adc8", bg="#1e1e2e", anchor="w"
-        )
-        self.lbl_color_sel.grid(row=(len(self.BLUEBEAM_PALETTE) - 1) // cols + 1,
-                                 column=0, columnspan=cols, sticky="w", pady=(2, 0))
-        return frm
-
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
         frm = tk.Frame(notebook, bg="#181825")
