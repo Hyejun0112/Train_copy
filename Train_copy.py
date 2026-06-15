@@ -65,7 +65,11 @@ def close_pdf_discard():
 #  핵심 작업 로직
 # ══════════════════════════════════════════════════════════
 
-def process_pair(src: str, dst: str, out: str, log_fn=None):
+class StoppedError(Exception):
+    pass
+
+
+def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None):
     """
     1) src 열기 → 마크업 전체 복사
     2) src 닫기
@@ -81,7 +85,12 @@ def process_pair(src: str, dst: str, out: str, log_fn=None):
         if log_fn:
             log_fn(msg)
 
+    def check_stop():
+        if stop_check and stop_check():
+            raise StoppedError()
+
     # ── 1) Source 열기 → 복사
+    check_stop()
     log(f"  [1/4] Source 열기: {os.path.basename(src)}\n")
     open_pdf(src)
     fit_page()
@@ -93,6 +102,7 @@ def process_pair(src: str, dst: str, out: str, log_fn=None):
 
     log("  [2/4] 마크업 복사 완료 → Source 닫기\n")
     close_pdf_discard()
+    check_stop()
 
     # ── 2) Target → Output 폴더에 미리 복사 (shutil 직접 복사)
     log(f"  [3/4] Output 복사: {os.path.basename(out)}\n")
@@ -105,6 +115,7 @@ def process_pair(src: str, dst: str, out: str, log_fn=None):
     open_pdf(out)
     fit_page()
     time.sleep(WAIT_SHORT)
+    check_stop()
 
     pyautogui.hotkey('ctrl', 'shift', 'v')   # Paste in Place
     time.sleep(WAIT_PASTE)
@@ -210,6 +221,7 @@ class App(tk.Tk):
                      background=[("selected", "#45475a")],
                      foreground=[("selected", "#cdd6f4")])
 
+        self.notebook = notebook
         self.list_src = self._file_listbox(notebook, "Source")
         self.list_dst = self._file_listbox(notebook, "Target")
         self.list_out = self._file_listbox(notebook, "Output")
@@ -355,6 +367,7 @@ class App(tk.Tk):
             text=f"{os.path.basename(path)}  ({len(src_files)}개)", fg="#a6adc8"
         )
         self._update_listbox(self.list_src, src_files)
+        self.notebook.select(0)
         self._log(f"[Source] {path}  ({len(src_files)}개)\n")
         self._refresh_mapping_label()
 
@@ -369,6 +382,7 @@ class App(tk.Tk):
             text=f"{os.path.basename(path)}  ({len(dst_files)}개)", fg="#a6adc8"
         )
         self._update_listbox(self.list_dst, dst_files)
+        self.notebook.select(1)
         self._log(f"[Target] {path}  ({len(dst_files)}개)\n")
         self._refresh_mapping_label()
 
@@ -382,6 +396,7 @@ class App(tk.Tk):
         out_files = sorted(f for f in os.listdir(path) if f.lower().endswith(".pdf"))
         self.lbl_out.config(text=os.path.basename(path), fg="#a6adc8")
         self._update_listbox(self.list_out, out_files)
+        self.notebook.select(2)
         self._log(f"[Output] {path}\n")
 
     def _update_listbox(self, lb: tk.Listbox, files: list):
@@ -408,7 +423,8 @@ class App(tk.Tk):
                 "매핑 창에서 직접 삭제/조정하세요."
             )
 
-        mapping = list(zip(src_files, dst_files))
+        if not mapping:
+            mapping = list(zip(src_files, dst_files))
 
         win = tk.Toplevel(self)
         win.title("파일 매핑 편집")
@@ -530,8 +546,14 @@ class App(tk.Tk):
                     src=os.path.join(src_folder, src),
                     dst=os.path.join(dst_folder, dst),
                     out=out_path,
-                    log_fn=self._log
+                    log_fn=self._log,
+                    stop_check=lambda: stop_flag
                 )
+            except StoppedError:
+                close_pdf_discard()
+                self._log("\n⏹ 사용자에 의해 중지됨\n")
+                self._set_status("중지됨", "#f38ba8")
+                return
             except Exception as e:
                 self._log(f"  ⚠ 오류: {e}\n")
 
