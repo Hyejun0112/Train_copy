@@ -207,6 +207,15 @@ def _annot_matches_filter(annot, color_hex, date_limit, author):
 
     if author:
         annot_author = (annot.info.get("title") or "").strip()
+        if not annot_author:
+            # 일부 마크업 유형은 annot.info에 title이 채워지지 않으므로
+            # PDF의 /T 키를 직접 읽어 대체 확인
+            try:
+                kind, val = annot.parent.xref_get_key(annot.xref, "T")
+                if kind == "string":
+                    annot_author = val.strip()
+            except Exception:
+                pass
         if annot_author.lower() != author.strip().lower():
             return False
 
@@ -233,6 +242,13 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
     for page in doc:
         for annot in page.annots() or []:
             a = (annot.info.get("title") or "").strip()
+            if not a:
+                try:
+                    kind, val = annot.parent.xref_get_key(annot.xref, "T")
+                    if kind == "string":
+                        a = val.strip()
+                except Exception:
+                    pass
             if a:
                 authors_seen.add(a)
 
