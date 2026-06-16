@@ -298,32 +298,17 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
     return tmp_path, kept, removed
 
 
-def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
-                 filter_settings=None):
-    """
-    1) src 열기 → 마크업 전체 복사
-    2) src 닫기
-    3) dst를 output 폴더로 먼저 복사 (shutil) → 복사본 열기
-    4) Paste in Place (Ctrl+Shift+V)
-    5) Ctrl+S 로 저장 (Save — 같은 파일명 덮어쓰기)
-    6) 닫기
-
-    ★ 저장을 'Save As' 다이얼로그 없이 Ctrl+S 로 처리
-      → 파일명 입력 오류 원천 차단
-    """
+def _open_and_copy_source(src: str, filter_settings=None, log_fn=None):
+    """Source PDF를 열고 마크업을 클립보드에 복사한 뒤 닫는다.
+    반환: (filter_kept, filter_removed, tmp_path_or_None)"""
     def log(msg):
         if log_fn:
             log_fn(msg)
 
-    def check_stop():
-        if stop_check and stop_check():
-            raise StoppedError()
-
-    # ── 1) Source 열기 → 복사
-    check_stop()
-
     open_src = src
     filter_kept, filter_removed = None, None
+    tmp_to_delete = None
+
     if filter_settings:
         log("  [필터] 마크업 필터 적용 중…\n")
         open_src, filter_kept, filter_removed = build_filtered_copy(
@@ -333,8 +318,10 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
             filter_settings.get("author", ""),
             log_fn=log,
         )
+        if open_src != src:
+            tmp_to_delete = open_src
 
-    log(f"  [1/4] Source 열기: {os.path.basename(src)}\n")
+    log(f"  [Source] 열기: {os.path.basename(src)}\n")
     open_pdf(open_src)
     fit_page()
     time.sleep(WAIT_SHORT)
@@ -342,9 +329,6 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     time.sleep(WAIT_SHORT)
 
     if filter_settings:
-        # 병합(그룹)된 마크업은 일부만 필터에 걸려 잘리면 글자/도형이 누락될 수 있음
-        # -> 복사 전에 전체 선택 상태에서 그룹을 해제(Ctrl+Shift+G)하여
-        #    각 마크업을 독립 객체로 만든 뒤 다시 전체 선택해서 복사
         log("  [필터] 병합 마크업 그룹 해제 중…\n")
         pyautogui.hotkey('ctrl', 'shift', 'g')
         time.sleep(WAIT_SHORT)
@@ -354,25 +338,35 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     pyautogui.hotkey('ctrl', 'c')
     time.sleep(WAIT_SHORT)
 
-    log("  [2/4] 마크업 복사 완료 → Source 닫기\n")
+    log("  [Source] 마크업 복사 완료 → Source 닫기\n")
     close_pdf_discard()
 
-    if open_src != src:
+    if tmp_to_delete:
         try:
-            os.remove(open_src)
+            os.remove(tmp_to_delete)
         except OSError:
             pass
 
-    check_stop()
+    return filter_kept, filter_removed
 
-    # ── 2) Target → Output 폴더에 미리 복사 (shutil 직접 복사)
-    log(f"  [3/4] Output 복사: {os.path.basename(out)}\n")
+
+def _paste_to_target(dst: str, out: str, log_fn=None, stop_check=None):
+    """클립보드 내용을 Target → Output에 붙여넣고 저장 후 Bluebeam을 닫는다."""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    def check_stop():
+        if stop_check and stop_check():
+            raise StoppedError()
+
+    check_stop()
+    log(f"  [Target] Output 복사: {os.path.basename(out)}\n")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    shutil.copy2(dst, out)   # dst 원본 → output 폴더 복사본 생성
+    shutil.copy2(dst, out)
     time.sleep(0.5)
 
-    # ── 3) 복사본(output) 열기 → Paste in Place → Ctrl+S 저장
-    log(f"  [4/4] Output 파일 열기 → 마크업 붙여넣기 → 저장\n")
+    log(f"  [Target] 열기 → 마크업 붙여넣기 → 저장\n")
     open_pdf(out)
     fit_page()
     time.sleep(WAIT_SHORT)
@@ -381,25 +375,48 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     pyautogui.hotkey('ctrl', 'shift', 'v')   # Paste in Place
     time.sleep(WAIT_PASTE)
 
-    pyautogui.hotkey('ctrl', 's')            # Save (덮어쓰기)
+    pyautogui.hotkey('ctrl', 's')            # Save
     time.sleep(2.5)
-    # 덮어쓰기 확인 팝업 대비 — Enter 또는 Y 모두 시도
-    try:
-        active = gw.getActiveWindow()
-        atitle = (active.title if active else "") or ""
-    except Exception:
-        atitle = ""
-    if atitle and "Bluebeam" not in atitle:
-        pyautogui.press('enter')
-        time.sleep(1.0)
-    else:
-        # 팝업이 없는 경우에도 Enter 한 번 눌러도 무방
-        pyautogui.press('enter')
-        time.sleep(1.0)
+    pyautogui.press('enter')                 # 덮어쓰기 확인 팝업 대비
+    time.sleep(1.0)
 
     close_bluebeam_app()
     log("  ✓ 완료\n")
+
+
+def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
+                 filter_settings=None):
+    """단일 Source → 단일 Target 처리 (하위 호환용)"""
+    def check_stop():
+        if stop_check and stop_check():
+            raise StoppedError()
+
+    check_stop()
+    filter_kept, filter_removed = _open_and_copy_source(src, filter_settings, log_fn)
+    check_stop()
+    _paste_to_target(dst, out, log_fn, stop_check)
     return {"filter_kept": filter_kept, "filter_removed": filter_removed}
+
+
+def process_source_group(src: str, targets: list, log_fn=None, stop_check=None,
+                         filter_settings=None):
+    """Source 하나 → Target 여러 개 처리 (Source를 한 번만 열고 복사).
+    targets: [(dst_path, out_path), ...]
+    반환: [(filter_kept, filter_removed), ...] — 첫 Target 기준 필터 결과, 나머지는 동일"""
+    def check_stop():
+        if stop_check and stop_check():
+            raise StoppedError()
+
+    check_stop()
+    filter_kept, filter_removed = _open_and_copy_source(src, filter_settings, log_fn)
+    check_stop()
+
+    results = []
+    for dst, out in targets:
+        _paste_to_target(dst, out, log_fn, stop_check)
+        results.append((filter_kept, filter_removed))
+        check_stop()
+    return results
 
 
 # ══════════════════════════════════════════════════════════
@@ -1088,83 +1105,105 @@ class App(tk.Tk):
             self._write_report(report_rows)
 
     def _run_worker_inner(self, report_rows):
-        for i, row in enumerate(mapping, 1):
+        filter_settings = None
+        if filter_enabled:
+            filter_settings = dict(
+                color=filter_color,
+                date_limit=filter_date_limit,
+                author=filter_author,
+            )
+
+        # Source별로 그룹핑: {(src_path): [(dst_path, out_path, src_name, dst_name), ...]}
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for row in mapping:
             src, dst = row[0], row[1]
-            # mapping 항목에 폴더 정보가 있으면 사용, 없으면 전역 폴더 사용
             s_dir = row[2] if len(row) > 2 and row[2] else src_folder
             d_dir = row[3] if len(row) > 3 and row[3] else dst_folder
+            src_path = os.path.join(s_dir, src)
+            dst_path = os.path.join(d_dir, dst)
+            out_path = os.path.join(output_folder, dst)
+            groups.setdefault(src_path, []).append((dst_path, out_path, src, dst))
+
+        total = len(mapping)
+        done = 0
+
+        for src_path, targets in groups.items():
+            src_name = os.path.basename(src_path)
+            n = len(targets)
+            self._log(f"\n▶ Source: {src_name}  ({n}개 Target)\n")
+            self._set_status(f"처리 중: {done + 1}~{done + n} / {total}")
 
             if stop_flag:
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
                 self._set_status("중지됨", "#f38ba8")
+                self._write_report(report_rows)
                 return
 
-            self._log(f"\n[{i}/{len(mapping)}] {src}  →  {dst}\n")
-            self._set_status(f"처리 중: {i} / {len(mapping)}")
-
-            out_path = os.path.join(output_folder, dst)
-
-            filter_settings = None
-            if filter_enabled:
-                filter_settings = dict(
-                    color=filter_color,
-                    date_limit=filter_date_limit,
-                    author=filter_author,
-                )
-
-            start_time = time.time()
+            # Source 열기 → 복사 (한 번만)
+            start_src = time.time()
             try:
-                result = process_pair(
-                    src=os.path.join(s_dir, src),
-                    dst=os.path.join(d_dir, dst),
-                    out=out_path,
-                    log_fn=self._log,
-                    stop_check=lambda: stop_flag,
-                    filter_settings=filter_settings
+                filter_kept, filter_removed = _open_and_copy_source(
+                    src_path, filter_settings, self._log
                 )
-                elapsed = time.time() - start_time
-                report_rows.append({
-                    "source": src,
-                    "target": dst,
-                    "output": dst,
-                    "status": "완료",
-                    "filter_kept": result.get("filter_kept"),
-                    "filter_removed": result.get("filter_removed"),
-                    "elapsed_sec": round(elapsed, 1),
-                    "error": "",
-                })
             except StoppedError:
-                close_pdf_discard()
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
                 self._set_status("중지됨", "#f38ba8")
                 self._write_report(report_rows)
                 return
             except Exception:
                 err = traceback.format_exc()
-                self._log(f"  ⚠ 오류:\n{err}\n")
-                report_rows.append({
-                    "source": src,
-                    "target": dst,
-                    "output": dst,
-                    "status": "오류",
-                    "filter_kept": "",
-                    "filter_removed": "",
-                    "elapsed_sec": round(time.time() - start_time, 1),
-                    "error": str(err).splitlines()[-1] if err else "",
-                })
+                self._log(f"  ⚠ Source 열기 오류:\n{err}\n")
+                for _, _, src_name2, dst_name in targets:
+                    report_rows.append({
+                        "source": src_name2, "target": dst_name, "output": dst_name,
+                        "status": "오류(Source)", "filter_kept": "", "filter_removed": "",
+                        "elapsed_sec": round(time.time() - start_src, 1),
+                        "error": str(err).splitlines()[-1] if err else "",
+                    })
+                done += n
+                self.after(0, lambda v=done: self.progress.configure(value=v))
+                continue
 
-            self.after(0, lambda v=i: self.progress.configure(value=v))
+            # 각 Target에 붙여넣기
+            for dst_path, out_path, src_name2, dst_name in targets:
+                done += 1
+                self._log(f"  [{done}/{total}] → {dst_name}\n")
+                start_time = time.time()
+                try:
+                    _paste_to_target(dst_path, out_path, self._log, lambda: stop_flag)
+                    elapsed = time.time() - start_time
+                    report_rows.append({
+                        "source": src_name2, "target": dst_name, "output": dst_name,
+                        "status": "완료",
+                        "filter_kept": filter_kept,
+                        "filter_removed": filter_removed,
+                        "elapsed_sec": round(elapsed, 1),
+                        "error": "",
+                    })
+                except StoppedError:
+                    self._log("\n⏹ 사용자에 의해 중지됨\n")
+                    self._set_status("중지됨", "#f38ba8")
+                    self._write_report(report_rows)
+                    return
+                except Exception:
+                    err = traceback.format_exc()
+                    self._log(f"  ⚠ 오류:\n{err}\n")
+                    report_rows.append({
+                        "source": src_name2, "target": dst_name, "output": dst_name,
+                        "status": "오류", "filter_kept": "", "filter_removed": "",
+                        "elapsed_sec": round(time.time() - start_time, 1),
+                        "error": str(err).splitlines()[-1] if err else "",
+                    })
 
-            # Output 탭 목록 갱신
-            out_files = sorted(_list_pdfs(output_folder))
-            self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
+                self.after(0, lambda v=done: self.progress.configure(value=v))
+                out_files = sorted(_list_pdfs(output_folder))
+                self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
 
         self._write_report(report_rows)
-
         self._log("\n✅ 모든 작업 완료!\n")
         self._set_status("완료 ✅", "#a6e3a1")
 
-        # 작업 완료 후 Output 폴더 자동 열기
         if output_folder:
             os.startfile(output_folder)
 
