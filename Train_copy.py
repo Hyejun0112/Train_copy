@@ -877,12 +877,16 @@ class App(tk.Tk):
     # ── 매핑 편집 창 ───────────────────────────────────────
 
     def _reset_mapping(self):
-        global mapping
-        if not mapping:
+        global mapping, src_files, dst_files
+        if not mapping and not src_files and not dst_files:
             return
         if messagebox.askyesno("매핑 초기화", "현재 매핑을 모두 지울까요?"):
             mapping = []
-            self._refresh_mapping_label()
+            src_files.clear()
+            dst_files.clear()
+            self.list_src.delete(0, tk.END)
+            self.list_dst.delete(0, tk.END)
+            self.lbl_mapping.config(text="매핑: 0 쌍")
             self._log("[매핑 초기화]\n")
 
     def _open_mapping(self):
@@ -997,7 +1001,7 @@ class App(tk.Tk):
                   ).pack(side="right")
 
     def _refresh_mapping_label(self):
-        n = len(mapping) if mapping else min(len(src_files), len(dst_files))
+        n = len(mapping)
         self.lbl_mapping.config(text=f"매핑: {n} 쌍")
 
     # ── 실행 / 중지 ────────────────────────────────────────
