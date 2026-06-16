@@ -1080,6 +1080,15 @@ class App(tk.Tk):
 
     def _run_worker(self):
         report_rows = []
+        try:
+            self._run_worker_inner(report_rows)
+        except Exception:
+            err = traceback.format_exc()
+            self._log(f"\n💥 예기치 않은 오류로 작업 중단:\n{err}\n")
+            self._set_status("오류로 중단 ❌", "#f38ba8")
+            self._write_report(report_rows)
+
+    def _run_worker_inner(self, report_rows):
         for i, row in enumerate(mapping, 1):
             src, dst = row[0], row[1]
             # mapping 항목에 폴더 정보가 있으면 사용, 없으면 전역 폴더 사용
@@ -1145,7 +1154,7 @@ class App(tk.Tk):
                     "error": str(err).splitlines()[-1] if err else "",
                 })
 
-            self.progress["value"] = i
+            self.after(0, lambda v=i: self.progress.configure(value=v))
 
             # Output 탭 목록 갱신
             out_files = sorted(_list_pdfs(output_folder))
