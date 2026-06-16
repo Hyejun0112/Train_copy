@@ -960,14 +960,15 @@ class App(tk.Tk):
                        selectcolor="#313244", activebackground="#1e1e2e",
                        activeforeground="#cdd6f4").pack(side="left", padx=(0, 12))
 
-        tk.Button(filter_frm, text="적용",
-                  **self._bkw("#89b4fa", fg="#1e1e2e"),
-                  font=("Segoe UI", 9)
-                  ).pack(side="left", padx=2)
-        tk.Button(filter_frm, text="초기화",
-                  **self._bkw("#7f849c"),
-                  font=("Segoe UI", 9)
-                  ).pack(side="left", padx=2)
+        # 버튼을 변수로 저장해서 나중에 command 연결
+        btn_apply = tk.Button(filter_frm, text="적용",
+                              **self._bkw("#89b4fa", fg="#1e1e2e"),
+                              font=("Segoe UI", 9))
+        btn_apply.pack(side="left", padx=2)
+        btn_clear_filter = tk.Button(filter_frm, text="필터 초기화",
+                                     **self._bkw("#7f849c"),
+                                     font=("Segoe UI", 9))
+        btn_clear_filter.pack(side="left", padx=2)
 
         tk.Label(filter_frm,
                  text="우클릭 → 행 삭제  |  헤더 클릭 → 정렬",
@@ -1070,9 +1071,8 @@ class App(tk.Tk):
             _load_tree()
             win.title(f"파일 매핑 편집  ({len(mapping)}쌍)")
 
-        # 버튼 커맨드 연결
-        filter_frm.winfo_children()[5].configure(command=_apply_filter)  # 적용
-        filter_frm.winfo_children()[6].configure(command=_clear_filter)  # 초기화
+        btn_apply.configure(command=_apply_filter)
+        btn_clear_filter.configure(command=_clear_filter)
         ent_filter.bind("<Return>", lambda e: _apply_filter())
 
         _load_tree()
