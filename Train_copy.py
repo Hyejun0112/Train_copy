@@ -907,9 +907,13 @@ class App(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title(f"파일 매핑 편집  ({len(mapping)}쌍)")
-        win.geometry("1100x600")
+        win.geometry("1050x520")
         win.configure(bg="#1e1e2e")
         win.grab_set()
+
+        tk.Label(win, text="우클릭 → 선택 행 삭제  |  확정 버튼을 눌러야 반영됩니다",
+                 font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e"
+                 ).pack(pady=(8, 2))
 
         style = ttk.Style(win)
         style.theme_use("clam")
@@ -920,84 +924,25 @@ class App(tk.Tk):
         style.configure("Map.Treeview.Heading",
                         background="#313244", foreground="#cba6f7",
                         font=("Segoe UI", 9, "bold"))
-        style.map("Map.Treeview.Heading",
-                  background=[("active", "#45475a")])
 
-        # ── 검색 / 필터 바 ─────────────────────────────────
-        filter_frm = tk.Frame(win, bg="#1e1e2e")
-        filter_frm.pack(fill="x", padx=12, pady=(8, 2))
-
-        tk.Label(filter_frm, text="🔍 검색:", font=("Segoe UI", 9),
-                 fg="#a6adc8", bg="#1e1e2e").pack(side="left")
-
-        filter_var = tk.StringVar()
-        ent_filter = tk.Entry(filter_frm, textvariable=filter_var, width=30,
-                              bg="#313244", fg="#cdd6f4",
-                              insertbackground="#cdd6f4", relief="flat",
-                              font=("Segoe UI", 9))
-        ent_filter.pack(side="left", padx=(4, 12))
-
-        tk.Label(filter_frm, text="대상:", font=("Segoe UI", 9),
-                 fg="#a6adc8", bg="#1e1e2e").pack(side="left")
-        col_var = tk.StringVar(value="전체")
-        col_menu = ttk.Combobox(filter_frm, textvariable=col_var, width=16,
-                                state="readonly",
-                                values=["전체", "Source 파일명", "Source 폴더",
-                                        "Target 파일명", "Target 폴더"])
-        col_menu.pack(side="left", padx=(4, 12))
-
-        tk.Label(filter_frm, text="정렬:", font=("Segoe UI", 9),
-                 fg="#a6adc8", bg="#1e1e2e").pack(side="left")
-        sort_col_var = tk.StringVar(value="(없음)")
-        sort_col_menu = ttk.Combobox(filter_frm, textvariable=sort_col_var, width=16,
-                                     state="readonly",
-                                     values=["(없음)", "Source 파일명", "Source 폴더",
-                                             "Target 파일명", "Target 폴더"])
-        sort_col_menu.pack(side="left", padx=(4, 4))
-        sort_asc_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(filter_frm, text="오름차순", variable=sort_asc_var,
-                       font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e",
-                       selectcolor="#313244", activebackground="#1e1e2e",
-                       activeforeground="#cdd6f4").pack(side="left", padx=(0, 12))
-
-        # 버튼을 변수로 저장해서 나중에 command 연결
-        btn_apply = tk.Button(filter_frm, text="적용",
-                              **self._bkw("#89b4fa", fg="#1e1e2e"),
-                              font=("Segoe UI", 9))
-        btn_apply.pack(side="left", padx=2)
-        btn_clear_filter = tk.Button(filter_frm, text="필터 초기화",
-                                     **self._bkw("#7f849c"),
-                                     font=("Segoe UI", 9))
-        btn_clear_filter.pack(side="left", padx=2)
-
-        tk.Label(filter_frm,
-                 text="우클릭 → 행 삭제  |  헤더 클릭 → 정렬",
-                 font=("Segoe UI", 8), fg="#585b70", bg="#1e1e2e"
-                 ).pack(side="right")
-
-        # ── Treeview ──────────────────────────────────────
         frm = tk.Frame(win, bg="#1e1e2e")
-        frm.pack(fill="both", expand=True, padx=12, pady=2)
-
-        COLS = ("#", "src", "src_dir", "dst", "dst_dir")
-        COL_LABELS = {"#": "#", "src": "Source 파일명 ▲",
-                      "src_dir": "Source 폴더",
-                      "dst": "Target 파일명",
-                      "dst_dir": "Target 폴더"}
-        COL_KEY = {"Source 파일명": "src", "Source 폴더": "src_dir",
-                   "Target 파일명": "dst", "Target 폴더": "dst_dir"}
-        COL_IDX = {"#": 0, "src": 1, "src_dir": 2, "dst": 3, "dst_dir": 4}
+        frm.pack(fill="both", expand=True, padx=12, pady=4)
 
         tree = ttk.Treeview(frm, style="Map.Treeview",
-                            columns=COLS, show="headings")
-        for col in COLS:
-            tree.heading(col, text=COL_LABELS[col],
-                         command=lambda c=col: _sort_by(c))
-            tree.column(col, width={"#": 38}.get(col, 240),
-                        anchor="center" if col == "#" else "w",
-                        stretch=col != "#")
+                            columns=("#", "src", "src_dir", "dst", "dst_dir"),
+                            show="headings")
+        tree.heading("#",       text="#",           anchor="center")
+        tree.heading("src",     text="Source 파일명")
+        tree.heading("src_dir", text="Source 폴더")
+        tree.heading("dst",     text="Target 파일명")
+        tree.heading("dst_dir", text="Target 폴더")
+        tree.column("#",       width=36,  anchor="center", stretch=False)
+        tree.column("src",     width=260)
+        tree.column("src_dir", width=180)
+        tree.column("dst",     width=260)
+        tree.column("dst_dir", width=180)
 
-        vsb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(frm, orient="vertical",   command=tree.yview)
         hsb = ttk.Scrollbar(frm, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         tree.grid(row=0, column=0, sticky="nsew")
@@ -1006,78 +951,12 @@ class App(tk.Tk):
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
 
-        _sort_state = {"col": None, "asc": True}
+        for i, row in enumerate(mapping, 1):
+            s  = row[0]; d  = row[1]
+            sd = row[2] if len(row) > 2 else ""
+            dd = row[3] if len(row) > 3 else ""
+            tree.insert("", "end", values=(i, s, sd, d, dd))
 
-        def _load_tree(data=None):
-            tree.delete(*tree.get_children())
-            rows = data if data is not None else mapping
-            for i, row in enumerate(rows, 1):
-                s  = row[0]; d  = row[1]
-                sd = row[2] if len(row) > 2 else ""
-                dd = row[3] if len(row) > 3 else ""
-                tree.insert("", "end", values=(i, s, sd, d, dd))
-
-        def _sort_by(col):
-            if col == "#":
-                return
-            idx = COL_IDX[col]
-            asc = not _sort_state["asc"] if _sort_state["col"] == col else True
-            _sort_state["col"] = col
-            _sort_state["asc"] = asc
-            items = [(tree.item(r)["values"], r) for r in tree.get_children()]
-            items.sort(key=lambda x: str(x[0][idx]).lower(), reverse=not asc)
-            for i, (vals, r) in enumerate(items):
-                tree.move(r, "", i)
-                vals = list(vals); vals[0] = i + 1
-                tree.item(r, values=vals)
-            arrow = "▲" if asc else "▼"
-            for c in COLS:
-                base = COL_LABELS[c].rstrip(" ▲▼")
-                tree.heading(c, text=base + (" " + arrow if c == col else ""))
-
-        def _apply_filter():
-            kw  = filter_var.get().strip().lower()
-            col = col_var.get()
-            sc  = sort_col_var.get()
-            asc = sort_asc_var.get()
-
-            rows = list(mapping)
-
-            if kw:
-                col_indices = {
-                    "전체":        [1, 2, 3, 4],
-                    "Source 파일명": [1], "Source 폴더": [2],
-                    "Target 파일명": [3], "Target 폴더": [4],
-                }[col]
-                rows = [r for r in rows if any(
-                    kw in str(r[i - 1] if i <= len(r) else "").lower()
-                    for i in col_indices
-                )]
-
-            if sc != "(없음)":
-                key_idx = {"Source 파일명": 0, "Source 폴더": 2,
-                           "Target 파일명": 1, "Target 폴더": 3}[sc]
-                rows.sort(key=lambda r: str(r[key_idx] if key_idx < len(r) else "").lower(),
-                          reverse=not asc)
-
-            _load_tree(rows)
-            win.title(f"파일 매핑 편집  ({len(rows)} / {len(mapping)}쌍 표시)")
-
-        def _clear_filter():
-            filter_var.set("")
-            col_var.set("전체")
-            sort_col_var.set("(없음)")
-            sort_asc_var.set(True)
-            _load_tree()
-            win.title(f"파일 매핑 편집  ({len(mapping)}쌍)")
-
-        btn_apply.configure(command=_apply_filter)
-        btn_clear_filter.configure(command=_clear_filter)
-        ent_filter.bind("<Return>", lambda e: _apply_filter())
-
-        _load_tree()
-
-        # ── 우클릭 삭제 ───────────────────────────────────
         ctx = tk.Menu(win, tearoff=0, bg="#313244", fg="#cdd6f4",
                       activebackground="#45475a")
 
@@ -1092,7 +971,6 @@ class App(tk.Tk):
         ctx.add_command(label="선택 행 삭제", command=_delete)
         tree.bind("<Button-3>", lambda e: ctx.post(e.x_root, e.y_root))
 
-        # ── 하단 버튼 ─────────────────────────────────────
         btn_frm = tk.Frame(win, bg="#1e1e2e")
         btn_frm.pack(fill="x", padx=12, pady=8)
 
