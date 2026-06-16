@@ -485,23 +485,30 @@ class App(tk.Tk):
         btn_frm = tk.Frame(left, bg="#1e1e2e")
         btn_frm.grid(row=5, column=0, sticky="ew", pady=(0, 4))
         btn_frm.columnconfigure(0, weight=1)
+        btn_frm.columnconfigure(0, weight=1)
         btn_frm.columnconfigure(1, weight=1)
         btn_frm.columnconfigure(2, weight=1)
+        btn_frm.columnconfigure(3, weight=1)
 
         tk.Button(btn_frm, text="매핑 편집",
                   command=self._open_mapping,
                   **self._bkw("#7f849c")
                   ).grid(row=0, column=0, sticky="ew", padx=2)
 
+        tk.Button(btn_frm, text="📂 Excel 매핑",
+                  command=self._load_mapping_excel,
+                  **self._bkw("#cba6f7", fg="#1e1e2e")
+                  ).grid(row=0, column=1, sticky="ew", padx=2)
+
         tk.Button(btn_frm, text="🚀 실행",
                   command=self._start_run,
                   **self._bkw("#a6e3a1", fg="#1e1e2e", bold=True)
-                  ).grid(row=0, column=1, sticky="ew", padx=2)
+                  ).grid(row=0, column=2, sticky="ew", padx=2)
 
         tk.Button(btn_frm, text="⏹ 중지",
                   command=self._stop,
                   **self._bkw("#f38ba8", fg="#1e1e2e")
-                  ).grid(row=0, column=2, sticky="ew", padx=2)
+                  ).grid(row=0, column=3, sticky="ew", padx=2)
 
         self.lbl_mapping = tk.Label(
             left, text="매핑: 0 쌍",
@@ -752,6 +759,89 @@ class App(tk.Tk):
             lb.itemconfig(i, bg="#1e1e2e")
         for i in range(1, len(files), 2):
             lb.itemconfig(i, bg="#181825")
+
+    # ── Excel 매핑 가져오기 ─────────────────────────────────
+
+    def _load_mapping_excel(self):
+        global mapping, src_folder, dst_folder, src_files, dst_files
+        try:
+            import openpyxl
+        except ImportError:
+            messagebox.showerror(
+                "openpyxl 필요",
+                "Excel 매핑 기능에는 openpyxl이 필요합니다.\n"
+                "터미널에서 'pip install openpyxl' 실행 후 다시 시도하세요."
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            title="매핑 Excel 파일 선택",
+            filetypes=[("Excel 파일", "*.xlsx *.xls"), ("모든 파일", "*.*")]
+        )
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = wb.active
+        except Exception as e:
+            messagebox.showerror("파일 오류", f"Excel 파일을 열 수 없습니다:\n{e}")
+            return
+
+        rows = []
+        skipped = []
+        for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            # 헤더(1행) 제외하고 A열=Source, B열=Target
+            if len(row) < 2:
+                continue
+            src_name = str(row[0]).strip() if row[0] is not None else ""
+            dst_name = str(row[1]).strip() if row[1] is not None else ""
+            # C열에 Source 폴더, D열에 Target 폴더가 있으면 선택적으로 읽음
+            src_dir  = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+            dst_dir  = str(row[3]).strip() if len(row) > 3 and row[3] else ""
+
+            if not src_name or not dst_name:
+                continue
+            # .pdf 확장자 자동 보완
+            if not src_name.lower().endswith(".pdf"):
+                src_name += ".pdf"
+            if not dst_name.lower().endswith(".pdf"):
+                dst_name += ".pdf"
+
+            rows.append((src_name, dst_name, src_dir, dst_dir))
+
+        if not rows:
+            messagebox.showwarning("매핑 없음", "Excel 파일에서 유효한 매핑을 찾지 못했습니다.\n"
+                                   "2행부터 A열=Source 파일명, B열=Target 파일명 형식으로 작성하세요.")
+            return
+
+        # 폴더 정보가 없으면 기존 src_folder / dst_folder 유지
+        first_src_dir = rows[0][2] if rows[0][2] else src_folder
+        first_dst_dir = rows[0][3] if rows[0][3] else dst_folder
+
+        if first_src_dir and first_src_dir != src_folder:
+            src_folder = first_src_dir
+            self.lbl_src.config(text=os.path.basename(src_folder), fg="#a6adc8")
+            self._log(f"[Excel 매핑] Source 폴더: {src_folder}\n")
+        if first_dst_dir and first_dst_dir != dst_folder:
+            dst_folder = first_dst_dir
+            self.lbl_dst.config(text=os.path.basename(dst_folder), fg="#a6adc8")
+            self._log(f"[Excel 매핑] Target 폴더: {dst_folder}\n")
+
+        mapping = [(r[0], r[1]) for r in rows]
+        src_files = list(dict.fromkeys(r[0] for r in rows))
+        dst_files = list(dict.fromkeys(r[1] for r in rows))
+
+        self._update_listbox(self.list_src, src_files)
+        self._update_listbox(self.list_dst, dst_files)
+
+        self._refresh_mapping_label()
+        self._log(f"[Excel 매핑] {len(mapping)}개 매핑 로드 완료 ← {os.path.basename(path)}\n")
+        for s, d in mapping:
+            self._log(f"    {s}  →  {d}\n")
+
+        messagebox.showinfo("Excel 매핑 완료",
+                            f"{len(mapping)}개 매핑을 가져왔습니다.\n'매핑 편집'에서 확인/수정 가능합니다.")
 
     # ── 매핑 편집 창 ───────────────────────────────────────
 
