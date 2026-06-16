@@ -866,6 +866,20 @@ class App(tk.Tk):
         self._update_listbox(self.list_dst, dst_files)
         self._refresh_mapping_label()
 
+        # 폴더 라벨 업데이트
+        global src_folder, dst_folder
+        if col_dirs and col_dirs[0]:
+            src_folder = col_dirs[0]
+            self.lbl_src.config(text=os.path.basename(src_folder.rstrip("/\\")) or src_folder,
+                                fg="#a6e3a1")
+        dst_dirs = [d for _, _, _, d in mapping if d]
+        if dst_dirs:
+            dst_folder = dst_dirs[0]
+            unique_dst_dirs = list(dict.fromkeys(d for _, _, _, d in mapping if d))
+            label = unique_dst_dirs[0] if len(unique_dst_dirs) == 1 else f"{len(unique_dst_dirs)}개 폴더"
+            self.lbl_dst.config(text=os.path.basename(label.rstrip("/\\")) or label,
+                                fg="#a6e3a1")
+
         self._log(f"[Excel 매핑] {len(mapping)}개 매핑 로드 ← {os.path.basename(path)}\n")
         for s, d, sd, dd in mapping:
             self._log(f"    [{os.path.basename(sd or src_folder)}] {s}  →  [{os.path.basename(dd or dst_folder)}] {d}\n")
