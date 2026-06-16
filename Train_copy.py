@@ -763,7 +763,16 @@ class App(tk.Tk):
     # ── Excel 매핑 가져오기 ─────────────────────────────────
 
     def _load_mapping_excel(self):
-        global mapping, src_folder, dst_folder, src_files, dst_files
+        """Excel 파일로 매핑 가져오기.
+
+        Excel 형식:
+          1행: 헤더 (무시)
+          2행: 폴더 경로행 — A2=Source 폴더, B2~=각 Train의 Target 폴더
+               (셀 값에 경로 구분자 \\ 또는 / 포함 시 경로행으로 자동 인식)
+          3행~: 파일명행 — A열=Source 파일명, B~N열=Train별 Target 파일명
+               (Source 하나에 Target 여러 개 → 각각 별도 매핑 쌍으로 확장)
+        """
+        global mapping, src_files, dst_files
         try:
             import openpyxl
         except ImportError:
@@ -788,60 +797,78 @@ class App(tk.Tk):
             messagebox.showerror("파일 오류", f"Excel 파일을 열 수 없습니다:\n{e}")
             return
 
-        rows = []
-        skipped = []
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            # 헤더(1행) 제외하고 A열=Source, B열=Target
-            if len(row) < 2:
-                continue
-            src_name = str(row[0]).strip() if row[0] is not None else ""
-            dst_name = str(row[1]).strip() if row[1] is not None else ""
-            # C열에 Source 폴더, D열에 Target 폴더가 있으면 선택적으로 읽음
-            src_dir  = str(row[2]).strip() if len(row) > 2 and row[2] else ""
-            dst_dir  = str(row[3]).strip() if len(row) > 3 and row[3] else ""
+        def _is_path(val):
+            s = str(val or "").strip()
+            return bool(s) and ("\\" in s or "/" in s or (len(s) > 2 and s[1] == ":"))
 
-            if not src_name or not dst_name:
-                continue
-            # .pdf 확장자 자동 보완
-            if not src_name.lower().endswith(".pdf"):
-                src_name += ".pdf"
-            if not dst_name.lower().endswith(".pdf"):
-                dst_name += ".pdf"
+        def _as_str(val):
+            s = str(val or "").strip()
+            if not s or s.lower() == "none":
+                return ""
+            return s
 
-            rows.append((src_name, dst_name, src_dir, dst_dir))
+        def _ensure_pdf(name):
+            return name if name.lower().endswith(".pdf") else name + ".pdf"
 
-        if not rows:
-            messagebox.showwarning("매핑 없음", "Excel 파일에서 유효한 매핑을 찾지 못했습니다.\n"
-                                   "2행부터 A열=Source 파일명, B열=Target 파일명 형식으로 작성하세요.")
+        # 모든 행 읽기 (헤더 1행 스킵)
+        all_rows = list(ws.iter_rows(min_row=2, values_only=True))
+        if not all_rows:
+            messagebox.showwarning("내용 없음", "Excel 파일에 데이터가 없습니다.")
             return
 
-        # 폴더 정보가 없으면 기존 src_folder / dst_folder 유지
-        first_src_dir = rows[0][2] if rows[0][2] else src_folder
-        first_dst_dir = rows[0][3] if rows[0][3] else dst_folder
+        # 폴더 경로 행 감지: 첫 데이터행(2행)에 경로 구분자가 있으면 폴더 행으로 간주
+        col_dirs = []   # 열별 Target 폴더 경로 (col 0 = Source 폴더)
+        data_start = 0
+        first = all_rows[0]
+        if any(_is_path(c) for c in first if c):
+            col_dirs = [_as_str(c) for c in first]
+            data_start = 1
+            # Source 폴더(A열 경로)가 있으면 GUI lbl_src 갱신
+            if col_dirs[0]:
+                self._log(f"[Excel 매핑] Source 폴더: {col_dirs[0]}\n")
 
-        if first_src_dir and first_src_dir != src_folder:
-            src_folder = first_src_dir
-            self.lbl_src.config(text=os.path.basename(src_folder), fg="#a6adc8")
-            self._log(f"[Excel 매핑] Source 폴더: {src_folder}\n")
-        if first_dst_dir and first_dst_dir != dst_folder:
-            dst_folder = first_dst_dir
-            self.lbl_dst.config(text=os.path.basename(dst_folder), fg="#a6adc8")
-            self._log(f"[Excel 매핑] Target 폴더: {dst_folder}\n")
+        n_targets = (ws.max_column - 1)  # A열 제외 나머지 = Target 열 수
 
-        mapping = [(r[0], r[1]) for r in rows]
-        src_files = list(dict.fromkeys(r[0] for r in rows))
-        dst_files = list(dict.fromkeys(r[1] for r in rows))
+        new_mapping = []
+        for row in all_rows[data_start:]:
+            src_name = _as_str(row[0])
+            if not src_name:
+                continue
+            src_name = _ensure_pdf(src_name)
+            s_dir = col_dirs[0] if col_dirs else src_folder
+
+            for col_i in range(1, len(row)):
+                dst_name = _as_str(row[col_i])
+                if not dst_name:
+                    continue
+                dst_name = _ensure_pdf(dst_name)
+                d_dir = col_dirs[col_i] if col_dirs and col_i < len(col_dirs) else dst_folder
+                new_mapping.append((src_name, dst_name, s_dir, d_dir))
+
+        if not new_mapping:
+            messagebox.showwarning("매핑 없음",
+                "Excel에서 유효한 매핑을 찾지 못했습니다.\n\n"
+                "형식:\n"
+                "  1행: 헤더 (무시)\n"
+                "  2행: 폴더 경로 (선택, 경로 구분자 포함 시 자동 인식)\n"
+                "  3행~: A열=Source 파일명, B~열=Train별 Target 파일명")
+            return
+
+        mapping   = new_mapping
+        src_files = list(dict.fromkeys(r[0] for r in mapping))
+        dst_files = list(dict.fromkeys(r[1] for r in mapping))
 
         self._update_listbox(self.list_src, src_files)
         self._update_listbox(self.list_dst, dst_files)
-
         self._refresh_mapping_label()
-        self._log(f"[Excel 매핑] {len(mapping)}개 매핑 로드 완료 ← {os.path.basename(path)}\n")
-        for s, d in mapping:
-            self._log(f"    {s}  →  {d}\n")
+
+        self._log(f"[Excel 매핑] {len(mapping)}개 매핑 로드 ← {os.path.basename(path)}\n")
+        for s, d, sd, dd in mapping:
+            self._log(f"    [{os.path.basename(sd or src_folder)}] {s}  →  [{os.path.basename(dd or dst_folder)}] {d}\n")
 
         messagebox.showinfo("Excel 매핑 완료",
-                            f"{len(mapping)}개 매핑을 가져왔습니다.\n'매핑 편집'에서 확인/수정 가능합니다.")
+                            f"{len(mapping)}개 매핑을 가져왔습니다.\n"
+                            f"'매핑 편집'에서 확인/수정 가능합니다.")
 
     # ── 매핑 편집 창 ───────────────────────────────────────
 
@@ -865,7 +892,7 @@ class App(tk.Tk):
             )
 
         if not mapping:
-            mapping = list(zip(use_src, use_dst))
+            mapping = [(s, d, src_folder, dst_folder) for s, d in zip(use_src, use_dst)]
 
         win = tk.Toplevel(self)
         win.title("파일 매핑 편집")
@@ -893,21 +920,28 @@ class App(tk.Tk):
         frm.pack(fill="both", expand=True, padx=12, pady=4)
 
         tree = ttk.Treeview(frm, style="Map.Treeview",
-                            columns=("#", "src", "dst"), show="headings")
-        tree.heading("#",   text="#",      anchor="center")
-        tree.heading("src", text="Source (마크업 원본)")
-        tree.heading("dst", text="Target (붙여넣을 도면)")
-        tree.column("#",   width=40, anchor="center", stretch=False)
-        tree.column("src", width=390)
-        tree.column("dst", width=390)
+                            columns=("#", "src", "src_dir", "dst", "dst_dir"), show="headings")
+        tree.heading("#",       text="#",           anchor="center")
+        tree.heading("src",     text="Source 파일명")
+        tree.heading("src_dir", text="Source 폴더")
+        tree.heading("dst",     text="Target 파일명")
+        tree.heading("dst_dir", text="Target 폴더")
+        tree.column("#",       width=36,  anchor="center", stretch=False)
+        tree.column("src",     width=230)
+        tree.column("src_dir", width=180)
+        tree.column("dst",     width=230)
+        tree.column("dst_dir", width=180)
 
         vsb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        for i, (s, d) in enumerate(mapping, 1):
-            tree.insert("", "end", values=(i, s, d))
+        for i, row in enumerate(mapping, 1):
+            s, d = row[0], row[1]
+            sd = row[2] if len(row) > 2 else ""
+            dd = row[3] if len(row) > 3 else ""
+            tree.insert("", "end", values=(i, s, sd, d, dd))
 
         ctx = tk.Menu(win, tearoff=0, bg="#313244", fg="#cdd6f4",
                       activebackground="#45475a")
@@ -928,8 +962,12 @@ class App(tk.Tk):
 
         def _confirm():
             global mapping
+            # tree columns: #, src, src_dir, dst, dst_dir  → index 1..4
             mapping = [
-                (tree.item(r)["values"][1], tree.item(r)["values"][2])
+                (tree.item(r)["values"][1],   # src
+                 tree.item(r)["values"][3],   # dst
+                 tree.item(r)["values"][2],   # src_dir
+                 tree.item(r)["values"][4])   # dst_dir
                 for r in tree.get_children()
             ]
             self._refresh_mapping_label()
@@ -988,7 +1026,12 @@ class App(tk.Tk):
 
     def _run_worker(self):
         report_rows = []
-        for i, (src, dst) in enumerate(mapping, 1):
+        for i, row in enumerate(mapping, 1):
+            src, dst = row[0], row[1]
+            # mapping 항목에 폴더 정보가 있으면 사용, 없으면 전역 폴더 사용
+            s_dir = row[2] if len(row) > 2 and row[2] else src_folder
+            d_dir = row[3] if len(row) > 3 and row[3] else dst_folder
+
             if stop_flag:
                 self._log("\n⏹ 사용자에 의해 중지됨\n")
                 self._set_status("중지됨", "#f38ba8")
@@ -1010,8 +1053,8 @@ class App(tk.Tk):
             start_time = time.time()
             try:
                 result = process_pair(
-                    src=os.path.join(src_folder, src),
-                    dst=os.path.join(dst_folder, dst),
+                    src=os.path.join(s_dir, src),
+                    dst=os.path.join(d_dir, dst),
                     out=out_path,
                     log_fn=self._log,
                     stop_check=lambda: stop_flag,
