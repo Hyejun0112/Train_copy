@@ -95,7 +95,8 @@ def close_pdf_discard():
 def close_bluebeam_app():
     """현재 Bluebeam 창을 완전히 종료한다.
     - 전체화면 상태로 남아 응답 없음(렉)이 발생하는 것을 방지하기 위해 먼저 Escape로 빠져나옴
-    - 작업이 끝난 PDF 창이 계속 쌓이지 않도록 Alt+F4로 앱 전체를 닫음"""
+    - 작업이 끝난 PDF 창이 계속 쌓이지 않도록 Alt+F4로 앱 전체를 닫음
+    - 완전히 닫힐 때까지 최대 15초 대기"""
     pyautogui.press('escape')
     time.sleep(WAIT_SHORT)
 
@@ -111,6 +112,7 @@ def close_bluebeam_app():
     pyautogui.hotkey('alt', 'f4')
     time.sleep(WAIT_SHORT)
 
+    # 저장 확인 팝업 처리 (변경사항 있을 경우)
     try:
         active = gw.getActiveWindow()
         title = (active.title if active else "") or ""
@@ -119,6 +121,16 @@ def close_bluebeam_app():
     if title and "Bluebeam" not in title:
         pyautogui.press('n')
         time.sleep(WAIT_SHORT)
+
+    # Bluebeam이 완전히 닫힐 때까지 최대 15초 대기
+    for _ in range(30):
+        time.sleep(0.5)
+        try:
+            remaining = gw.getWindowsWithTitle("Bluebeam")
+        except Exception:
+            remaining = []
+        if not remaining:
+            break
 
 
 # ══════════════════════════════════════════════════════════
@@ -370,9 +382,20 @@ def process_pair(src: str, dst: str, out: str, log_fn=None, stop_check=None,
     time.sleep(WAIT_PASTE)
 
     pyautogui.hotkey('ctrl', 's')            # Save (덮어쓰기)
-    time.sleep(2.0)
-    pyautogui.press('enter')                 # 덮어쓰기 확인 팝업 대비
-    time.sleep(1.0)
+    time.sleep(2.5)
+    # 덮어쓰기 확인 팝업 대비 — Enter 또는 Y 모두 시도
+    try:
+        active = gw.getActiveWindow()
+        atitle = (active.title if active else "") or ""
+    except Exception:
+        atitle = ""
+    if atitle and "Bluebeam" not in atitle:
+        pyautogui.press('enter')
+        time.sleep(1.0)
+    else:
+        # 팝업이 없는 경우에도 Enter 한 번 눌러도 무방
+        pyautogui.press('enter')
+        time.sleep(1.0)
 
     close_bluebeam_app()
     log("  ✓ 완료\n")
