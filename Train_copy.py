@@ -351,7 +351,7 @@ def _open_and_copy_source(src: str, filter_settings=None, log_fn=None):
 
 
 def _paste_to_target(dst: str, out: str, log_fn=None, stop_check=None):
-    """클립보드 내용을 Target → Output에 붙여넣고 저장 후 Bluebeam을 닫는다."""
+    """클립보드 내용을 Target → Output에 붙여넣고 저장 후 해당 탭만 닫는다."""
     def log(msg):
         if log_fn:
             log_fn(msg)
@@ -380,7 +380,9 @@ def _paste_to_target(dst: str, out: str, log_fn=None, stop_check=None):
     pyautogui.press('enter')                 # 덮어쓰기 확인 팝업 대비
     time.sleep(1.0)
 
-    close_bluebeam_app()
+    # 탭만 닫기 (Bluebeam 앱은 유지) — 저장 완료 후라 저장 팝업 없음
+    pyautogui.hotkey('ctrl', 'w')
+    time.sleep(WAIT_SHORT)
     log("  ✓ 완료\n")
 
 
@@ -1103,6 +1105,10 @@ class App(tk.Tk):
             self._log(f"\n💥 예기치 않은 오류로 작업 중단:\n{err}\n")
             self._set_status("오류로 중단 ❌", "#f38ba8")
             self._write_report(report_rows)
+            try:
+                close_bluebeam_app()
+            except Exception:
+                pass
 
     def _run_worker_inner(self, report_rows):
         filter_settings = None
@@ -1201,7 +1207,12 @@ class App(tk.Tk):
                 self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
 
         self._write_report(report_rows)
-        self._log("\n✅ 모든 작업 완료!\n")
+
+        # 모든 작업 완료 후 Bluebeam 완전 종료
+        self._log("\n[마무리] Bluebeam 종료 중…\n")
+        close_bluebeam_app()
+
+        self._log("✅ 모든 작업 완료!\n")
         self._set_status("완료 ✅", "#a6e3a1")
 
         if output_folder:
