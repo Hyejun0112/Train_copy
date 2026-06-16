@@ -799,7 +799,7 @@ class App(tk.Tk):
           3행~: 파일명행 — A열=Source 파일명, B~N열=Train별 Target 파일명
                (Source 하나에 Target 여러 개 → 각각 별도 매핑 쌍으로 확장)
         """
-        global mapping, src_files, dst_files
+        global mapping, src_files, dst_files, src_folder, dst_folder
         try:
             import openpyxl
         except ImportError:
@@ -890,7 +890,6 @@ class App(tk.Tk):
         self._refresh_mapping_label()
 
         # 폴더 라벨 업데이트
-        global src_folder, dst_folder
         if col_dirs and col_dirs[0]:
             src_folder = col_dirs[0]
             self.lbl_src.config(text=os.path.basename(src_folder.rstrip("/\\")) or src_folder,
