@@ -35,6 +35,11 @@ filter_color     = ""   # RGB hex, 예: "0000FF"
 filter_date_limit = ""  # "YYYY-MM-DD" (이 날짜까지 작성된 마크업만 포함)
 filter_author    = ""   # 작성자(사번)
 
+# 위치 보정 설정 (도면 레이아웃이 다른 경우)
+pos_correction_enabled = False
+anchor_tag1 = ""
+anchor_tag2 = ""
+
 
 def _list_pdfs(path: str) -> list:
     """폴더 내 PDF 목록 (필터 작업용 임시 파일 '_filtered_*'는 제외)"""
@@ -296,6 +301,197 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
     doc.save(tmp_path)
     doc.close()
     return tmp_path, kept, removed
+
+
+# ══════════════════════════════════════════════════════════
+#  위치 보정 (도면 레이아웃이 다른 경우) — PyMuPDF 직접 복사
+# ══════════════════════════════════════════════════════════
+
+def _find_tag_center(doc, tag: str):
+    """문서 전체 페이지에서 tag 텍스트를 검색해 (page_index, (x, y)) 반환.
+    못 찾으면 None. 여러 개 발견 시 첫 번째 매치 사용."""
+    for page in doc:
+        hits = page.search_for(tag)
+        if hits:
+            r = hits[0]
+            return page.number, ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+    return None
+
+
+def _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2):
+    """기준점 2개로 이동+회전+스케일을 포함한 2D 유사변환 행렬(fitz.Matrix) 계산.
+    src 좌표 → dst 좌표로 매핑."""
+    s1 = complex(*src_p1)
+    s2 = complex(*src_p2)
+    d1 = complex(*dst_p1)
+    d2 = complex(*dst_p2)
+    if s2 == s1:
+        raise ValueError("기준 태그 두 개의 위치가 동일합니다. 다른 태그를 사용하세요.")
+
+    k = (d2 - d1) / (s2 - s1)   # 스케일 * 회전을 복소수로 표현
+    a, b = k.real, k.imag
+    # dst_x = a*src_x - b*src_y + e
+    # dst_y = b*src_x + a*src_y + f
+    e = d1.real - (a * s1.real - b * s1.imag)
+    f = d1.imag - (b * s1.real + a * s1.imag)
+    return fitz.Matrix(a, b, -b, a, e, f)
+
+
+# PyMuPDF로 직접 재생성 가능한 마크업 타입(geometry 기반)
+_SUPPORTED_TRANSFORM_TYPES = {
+    "Square", "Circle", "Line", "PolyLine", "Polygon",
+    "FreeText", "Highlight", "Ink", "StrikeOut", "Underline", "Squiggly",
+}
+
+
+def _copy_annot_with_transform(src_annot, dst_page, matrix):
+    """src_annot의 geometry를 matrix로 변환해 dst_page에 동일한 종류의 마크업을 생성.
+    지원하지 않는 타입이면 False 반환(스킵)."""
+    subtype = src_annot.type[1]
+    colors = src_annot.colors or {}
+    stroke = colors.get("stroke")
+    fill = colors.get("fill")
+    width = (src_annot.border or {}).get("width", 1) or 1
+    opacity = src_annot.opacity if src_annot.opacity is not None else 1
+
+    def tp(pt):
+        """튜플/Point를 fitz.Point로 변환 후 matrix 적용"""
+        return fitz.Point(pt[0], pt[1]) * matrix
+
+    new_annot = None
+
+    if subtype in ("Square",):
+        rect = src_annot.rect * matrix
+        new_annot = dst_page.add_rect_annot(rect)
+    elif subtype == "Circle":
+        rect = src_annot.rect * matrix
+        new_annot = dst_page.add_circle_annot(rect)
+    elif subtype in ("Line",):
+        verts = src_annot.vertices
+        pts = [tp(p) for p in verts] if verts else None
+        if not pts:
+            v = src_annot.line
+            pts = [tp(v[0]), tp(v[1])] if v else None
+        if not pts or len(pts) < 2:
+            return False
+        new_annot = dst_page.add_line_annot(pts[0], pts[1])
+    elif subtype in ("PolyLine", "Polygon"):
+        verts = src_annot.vertices
+        if not verts:
+            return False
+        pts = [tp(v) for v in verts]
+        if subtype == "PolyLine":
+            new_annot = dst_page.add_polyline_annot(pts)
+        else:
+            new_annot = dst_page.add_polygon_annot(pts)
+    elif subtype == "Ink":
+        try:
+            strokes = src_annot.ink_list
+        except Exception:
+            return False
+        if not strokes:
+            return False
+        transformed = [[tp(pt) for pt in stroke] for stroke in strokes]
+        new_annot = dst_page.add_ink_annot(transformed)
+    elif subtype == "FreeText":
+        rect = src_annot.rect * matrix
+        text = (src_annot.info or {}).get("content", "") or ""
+        new_annot = dst_page.add_freetext_annot(rect, text)
+    elif subtype in ("Highlight", "StrikeOut", "Underline", "Squiggly"):
+        quads = src_annot.vertices
+        if not quads or len(quads) < 4:
+            return False
+        # vertices: 4개씩 끊어서 quad 단위로 변환
+        flat = [tp(pt) for pt in quads]
+        if subtype == "Highlight":
+            new_annot = dst_page.add_highlight_annot(flat)
+        elif subtype == "StrikeOut":
+            new_annot = dst_page.add_strikeout_annot(flat)
+        elif subtype == "Underline":
+            new_annot = dst_page.add_underline_annot(flat)
+        else:
+            new_annot = dst_page.add_squiggly_annot(flat)
+    else:
+        return False
+
+    if new_annot is None:
+        return False
+
+    try:
+        col_kwargs = {}
+        if stroke:
+            col_kwargs["stroke"] = stroke
+        if fill:
+            col_kwargs["fill"] = fill
+        if col_kwargs:
+            new_annot.set_colors(**col_kwargs)
+        new_annot.set_border(width=width)
+        new_annot.set_opacity(opacity)
+        new_annot.update()
+    except Exception:
+        pass
+
+    return True
+
+
+def copy_markups_with_position_correction(src_path, dst_path, out_path,
+                                           tag1, tag2, log_fn=None):
+    """도면 레이아웃이 다른 경우: Bluebeam 자동화 없이 PyMuPDF로 직접
+    마크업 좌표를 보정해서 Target(→Output)에 복사한다.
+    반환: (copied, skipped) 마크업 개수"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if fitz is None:
+        raise RuntimeError("PyMuPDF(fitz)가 설치되어 있지 않습니다. 'pip install PyMuPDF' 필요")
+
+    src_doc = fitz.open(src_path)
+    dst_doc = fitz.open(dst_path)
+
+    src_hit = _find_tag_center(src_doc, tag1)
+    src_hit2 = _find_tag_center(src_doc, tag2)
+    dst_hit = _find_tag_center(dst_doc, tag1)
+    dst_hit2 = _find_tag_center(dst_doc, tag2)
+
+    if not (src_hit and src_hit2 and dst_hit and dst_hit2):
+        src_doc.close()
+        dst_doc.close()
+        missing = []
+        if not src_hit:  missing.append(f"Source에서 '{tag1}' 못 찾음")
+        if not src_hit2: missing.append(f"Source에서 '{tag2}' 못 찾음")
+        if not dst_hit:  missing.append(f"Target에서 '{tag1}' 못 찾음")
+        if not dst_hit2: missing.append(f"Target에서 '{tag2}' 못 찾음")
+        raise RuntimeError("기준 태그를 찾지 못했습니다: " + ", ".join(missing))
+
+    src_page_idx, src_p1 = src_hit
+    _, src_p2 = src_hit2
+    dst_page_idx, dst_p1 = dst_hit
+    _, dst_p2 = dst_hit2
+
+    matrix = _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2)
+    log(f"  [위치 보정] 변환 행렬 계산 완료 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
+
+    src_page = src_doc[src_page_idx]
+    dst_page = dst_doc[dst_page_idx]
+
+    copied, skipped = 0, 0
+    for annot in src_page.annots() or []:
+        ok = _copy_annot_with_transform(annot, dst_page, matrix)
+        if ok:
+            copied += 1
+        else:
+            skipped += 1
+
+    if skipped:
+        log(f"  [위치 보정] ⚠ {skipped}개 마크업은 지원하지 않는 타입이라 스킵됨\n")
+    log(f"  [위치 보정] {copied}개 마크업 좌표 보정하여 복사 완료\n")
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    dst_doc.save(out_path)
+    src_doc.close()
+    dst_doc.close()
+    return copied, skipped
 
 
 def _open_and_copy_source(src: str, filter_settings=None, log_fn=None):
@@ -566,6 +762,10 @@ class App(tk.Tk):
         self._sec(left, "🎯 마크업 필터 (선택)", row=7)
         self._build_filter_section(left, row=8)
 
+        # 위치 보정 섹션 (도면 레이아웃이 다른 경우)
+        self._sec(left, "📐 도면 위치 보정 (선택)", row=9)
+        self._build_position_section(left, row=10)
+
     def _build_filter_section(self, parent, row: int):
         frm = tk.Frame(parent, bg="#1e1e2e")
         frm.grid(row=row, column=0, sticky="ew", pady=(2, 0))
@@ -598,6 +798,41 @@ class App(tk.Tk):
                  "   이 날짜까지 작성된 마크업만 Target에 붙여넣습니다.\n"
                  "   작성자: 마크업 작성자(사번)와 정확히 일치해야 함\n"
                  "   (비워두면 해당 조건은 무시)",
+            font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
+            justify="left", anchor="w"
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+
+    def _build_position_section(self, parent, row: int):
+        frm = tk.Frame(parent, bg="#1e1e2e")
+        frm.grid(row=row, column=0, sticky="ew", pady=(2, 0))
+        frm.columnconfigure(1, weight=1)
+
+        self.var_pos_correction = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            frm, text="위치 보정 사용 (Source/Target 도면 레이아웃이 다른 경우)",
+            variable=self.var_pos_correction,
+            font=("Segoe UI", 9), fg="#a6adc8", bg="#1e1e2e",
+            selectcolor="#313244", activebackground="#1e1e2e",
+            activeforeground="#cdd6f4", wraplength=280, justify="left"
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(2, 4))
+
+        def _entry_row(r, label, width=24):
+            tk.Label(frm, text=label, font=("Segoe UI", 8),
+                     fg="#6c7086", bg="#1e1e2e", anchor="w", width=10
+                     ).grid(row=r, column=0, sticky="w")
+            e = tk.Entry(frm, width=width, bg="#181825", fg="#cdd6f4",
+                          insertbackground="#cdd6f4", relief="flat")
+            e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
+            return e
+
+        self.ent_anchor1 = _entry_row(1, "기준 태그 1")
+        self.ent_anchor2 = _entry_row(2, "기준 태그 2")
+
+        tk.Label(
+            frm,
+            text="※ Source/Target 도면에 공통으로 존재하는 텍스트(예: 1004, 1009)\n"
+                 "   두 개를 입력하면 좌표 차이를 계산해 마크업 위치를 보정합니다.\n"
+                 "   (이동 + 회전 + 스케일까지 보정, Bluebeam 자동화 없이 직접 적용)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
@@ -1064,6 +1299,7 @@ class App(tk.Tk):
     def _start_run(self):
         global stop_flag, filter_enabled, filter_color
         global filter_date_limit, filter_author
+        global pos_correction_enabled, anchor_tag1, anchor_tag2
         if not mapping:
             messagebox.showwarning("매핑 없음", "먼저 '매핑 편집'에서 확정하세요.")
             return
@@ -1076,14 +1312,25 @@ class App(tk.Tk):
         filter_date_limit = _normalize_date_input(self.ent_date_limit.get())
         filter_author    = self.ent_author.get().strip()
 
-        if filter_enabled:
+        pos_correction_enabled = self.var_pos_correction.get()
+        anchor_tag1 = self.ent_anchor1.get().strip()
+        anchor_tag2 = self.ent_anchor2.get().strip()
+
+        if filter_enabled or pos_correction_enabled:
             if fitz is None:
                 messagebox.showerror(
                     "PyMuPDF 필요",
-                    "마크업 필터 기능에는 PyMuPDF가 필요합니다.\n"
+                    "마크업 필터 / 위치 보정 기능에는 PyMuPDF가 필요합니다.\n"
                     "터미널에서 'pip install PyMuPDF' 실행 후 다시 시도하세요."
                 )
                 return
+
+        if pos_correction_enabled and not (anchor_tag1 and anchor_tag2):
+            messagebox.showwarning(
+                "기준 태그 필요",
+                "위치 보정을 사용하려면 기준 태그 1, 2를 모두 입력하세요."
+            )
+            return
 
         stop_flag = False
         self._set_status("실행 중…", "#a6e3a1")
@@ -1145,6 +1392,12 @@ class App(tk.Tk):
                 self._set_status("중지됨", "#f38ba8")
                 self._write_report(report_rows)
                 return
+
+            if pos_correction_enabled:
+                done = self._process_group_with_position_correction(
+                    src_path, targets, filter_settings, report_rows, done, total
+                )
+                continue
 
             # Source 열기 → 복사 (한 번만)
             start_src = time.time()
@@ -1217,6 +1470,76 @@ class App(tk.Tk):
 
         if output_folder:
             os.startfile(output_folder)
+
+    def _process_group_with_position_correction(self, src_path, targets,
+                                                 filter_settings, report_rows,
+                                                 done, total):
+        """위치 보정 모드: Bluebeam 자동화 없이 PyMuPDF로 직접 좌표 보정하여 복사.
+        done(처리 완료 개수)을 갱신해서 반환한다."""
+        src_name = os.path.basename(src_path)
+        self._log(f"\n▶ Source: {src_name}  ({len(targets)}개 Target) [위치 보정 모드]\n")
+
+        open_src = src_path
+        tmp_to_delete = None
+        if filter_settings:
+            try:
+                open_src, kept, removed = build_filtered_copy(
+                    src_path, "",
+                    filter_settings.get("date_limit", ""),
+                    filter_settings.get("author", ""),
+                    log_fn=self._log,
+                )
+                if open_src != src_path:
+                    tmp_to_delete = open_src
+            except Exception:
+                err = traceback.format_exc()
+                self._log(f"  ⚠ 필터 적용 오류:\n{err}\n")
+                for _, _, src_name2, dst_name in targets:
+                    done += 1
+                    report_rows.append({
+                        "source": src_name2, "target": dst_name, "output": dst_name,
+                        "status": "오류(필터)", "filter_kept": "", "filter_removed": "",
+                        "elapsed_sec": 0, "error": str(err).splitlines()[-1] if err else "",
+                    })
+                self.after(0, lambda v=done: self.progress.configure(value=v))
+                return done
+
+        for dst_path, out_path, src_name2, dst_name in targets:
+            done += 1
+            self._log(f"  [{done}/{total}] → {dst_name}\n")
+            start_time = time.time()
+            try:
+                copied, skipped = copy_markups_with_position_correction(
+                    open_src, dst_path, out_path, anchor_tag1, anchor_tag2, self._log
+                )
+                report_rows.append({
+                    "source": src_name2, "target": dst_name, "output": dst_name,
+                    "status": "완료(위치보정)",
+                    "filter_kept": copied, "filter_removed": skipped,
+                    "elapsed_sec": round(time.time() - start_time, 1),
+                    "error": "",
+                })
+            except Exception:
+                err = traceback.format_exc()
+                self._log(f"  ⚠ 오류:\n{err}\n")
+                report_rows.append({
+                    "source": src_name2, "target": dst_name, "output": dst_name,
+                    "status": "오류", "filter_kept": "", "filter_removed": "",
+                    "elapsed_sec": round(time.time() - start_time, 1),
+                    "error": str(err).splitlines()[-1] if err else "",
+                })
+
+            self.after(0, lambda v=done: self.progress.configure(value=v))
+            out_files = sorted(_list_pdfs(output_folder))
+            self.after(0, lambda fl=out_files: self._update_listbox(self.list_out, fl))
+
+        if tmp_to_delete:
+            try:
+                os.remove(tmp_to_delete)
+            except OSError:
+                pass
+
+        return done
 
     def _write_report(self, report_rows):
         """처리 결과를 Output 폴더에 CSV로 저장"""
