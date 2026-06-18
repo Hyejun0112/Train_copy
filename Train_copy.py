@@ -6,6 +6,7 @@ import tempfile
 import traceback
 import time
 import threading
+import multiprocessing as mp
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import pyautogui
@@ -547,6 +548,54 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path,
     src_doc.close()
     dst_doc.close()
     return copied, skipped
+
+
+def _position_correction_subprocess_main(src_path, dst_path, out_path, tag1, tag2, result_queue):
+    """별도 프로세스에서 실행되는 진입점. PyMuPDF 네이티브 크래시가 나도
+    이 프로세스만 죽고 메인 GUI 프로세스는 영향받지 않는다."""
+    try:
+        copied, skipped = copy_markups_with_position_correction(
+            src_path, dst_path, out_path, tag1, tag2, log_fn=None
+        )
+        result_queue.put(("ok", copied, skipped))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
+
+
+def run_position_correction_isolated(src_path, dst_path, out_path, tag1, tag2,
+                                     log_fn=None, timeout=90):
+    """위치 보정을 별도 프로세스에서 실행해 네이티브 크래시로부터 메인 앱을 보호한다."""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_position_correction_subprocess_main,
+        args=(src_path, dst_path, out_path, tag1, tag2, result_queue),
+    )
+    proc.start()
+    proc.join(timeout)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise RuntimeError(f"위치 보정 작업이 {timeout}초 내에 끝나지 않아 중단했습니다.")
+
+    try:
+        result = result_queue.get_nowait()
+    except Exception:
+        exitcode = proc.exitcode
+        raise RuntimeError(
+            f"위치 보정 작업이 비정상 종료되었습니다 (exit code {exitcode}). "
+            "PyMuPDF 내부 오류로 추정됩니다. 기준 태그를 다른 텍스트로 바꿔보세요."
+        )
+
+    status = result[0]
+    if status == "error":
+        raise RuntimeError(result[1])
+    return result[1], result[2]   # copied, skipped
 
 
 def _open_and_copy_source(src: str, filter_settings=None, log_fn=None):
@@ -1564,7 +1613,7 @@ class App(tk.Tk):
             self._log(f"  [{done}/{total}] → {dst_name}\n")
             start_time = time.time()
             try:
-                copied, skipped = copy_markups_with_position_correction(
+                copied, skipped = run_position_correction_isolated(
                     open_src, dst_path, out_path, anchor_tag1, anchor_tag2, self._log
                 )
                 report_rows.append({
@@ -1637,5 +1686,6 @@ class App(tk.Tk):
 # ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    mp.freeze_support()
     app = App()
     app.mainloop()
