@@ -1,5 +1,6 @@
 import os
 import csv
+import math
 import shutil
 import tempfile
 import traceback
@@ -334,16 +335,46 @@ def _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2):
     s2 = complex(*src_p2)
     d1 = complex(*dst_p1)
     d2 = complex(*dst_p2)
-    if s2 == s1:
-        raise ValueError("기준 태그 두 개의 위치가 동일합니다. 다른 태그를 사용하세요.")
+
+    src_dist = abs(s2 - s1)
+    dst_dist = abs(d2 - d1)
+    if src_dist < 5 or dst_dist < 5:
+        raise ValueError(
+            "기준 태그 두 개의 위치가 너무 가깝습니다(거리 < 5pt). "
+            "서로 멀리 떨어진 고유한 텍스트 2개를 사용하세요."
+        )
+
+    scale = dst_dist / src_dist
+    if scale < 0.1 or scale > 10:
+        raise ValueError(
+            f"계산된 스케일({scale:.2f}배)이 비정상적입니다. "
+            "기준 태그가 잘못 매칭되었을 가능성이 높습니다. "
+            "더 고유하고 정확한 텍스트를 기준 태그로 사용하세요."
+        )
 
     k = (d2 - d1) / (s2 - s1)   # 스케일 * 회전을 복소수로 표현
     a, b = k.real, k.imag
+    if not (math.isfinite(a) and math.isfinite(b)):
+        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
     # dst_x = a*src_x - b*src_y + e
     # dst_y = b*src_x + a*src_y + f
     e = d1.real - (a * s1.real - b * s1.imag)
     f = d1.imag - (b * s1.real + a * s1.imag)
+    if not all(math.isfinite(v) for v in (e, f)):
+        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
     return fitz.Matrix(a, b, -b, a, e, f)
+
+
+def _is_finite_point(pt) -> bool:
+    return math.isfinite(pt[0]) and math.isfinite(pt[1]) and \
+        abs(pt[0]) < 1_000_000 and abs(pt[1]) < 1_000_000
+
+
+def _is_finite_rect(rect) -> bool:
+    return all(math.isfinite(v) for v in (rect.x0, rect.y0, rect.x1, rect.y1)) and \
+        abs(rect.x0) < 1_000_000 and abs(rect.y0) < 1_000_000 and \
+        abs(rect.x1) < 1_000_000 and abs(rect.y1) < 1_000_000 and \
+        rect.width > 0.01 and rect.height > 0.01
 
 
 # PyMuPDF로 직접 재생성 가능한 마크업 타입(geometry 기반)
@@ -369,58 +400,73 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
 
     new_annot = None
 
-    if subtype in ("Square",):
-        rect = src_annot.rect * matrix
-        new_annot = dst_page.add_rect_annot(rect)
-    elif subtype == "Circle":
-        rect = src_annot.rect * matrix
-        new_annot = dst_page.add_circle_annot(rect)
-    elif subtype in ("Line",):
-        verts = src_annot.vertices
-        pts = [tp(p) for p in verts] if verts else None
-        if not pts:
-            v = src_annot.line
-            pts = [tp(v[0]), tp(v[1])] if v else None
-        if not pts or len(pts) < 2:
-            return False
-        new_annot = dst_page.add_line_annot(pts[0], pts[1])
-    elif subtype in ("PolyLine", "Polygon"):
-        verts = src_annot.vertices
-        if not verts:
-            return False
-        pts = [tp(v) for v in verts]
-        if subtype == "PolyLine":
-            new_annot = dst_page.add_polyline_annot(pts)
+    try:
+        if subtype in ("Square",):
+            rect = src_annot.rect * matrix
+            if not _is_finite_rect(rect):
+                return False
+            new_annot = dst_page.add_rect_annot(rect)
+        elif subtype == "Circle":
+            rect = src_annot.rect * matrix
+            if not _is_finite_rect(rect):
+                return False
+            new_annot = dst_page.add_circle_annot(rect)
+        elif subtype in ("Line",):
+            verts = src_annot.vertices
+            pts = [tp(p) for p in verts] if verts else None
+            if not pts:
+                v = src_annot.line
+                pts = [tp(v[0]), tp(v[1])] if v else None
+            if not pts or len(pts) < 2 or not all(_is_finite_point(p) for p in pts):
+                return False
+            new_annot = dst_page.add_line_annot(pts[0], pts[1])
+        elif subtype in ("PolyLine", "Polygon"):
+            verts = src_annot.vertices
+            if not verts:
+                return False
+            pts = [tp(v) for v in verts]
+            if not all(_is_finite_point(p) for p in pts):
+                return False
+            if subtype == "PolyLine":
+                new_annot = dst_page.add_polyline_annot(pts)
+            else:
+                new_annot = dst_page.add_polygon_annot(pts)
+        elif subtype == "Ink":
+            try:
+                strokes = src_annot.ink_list
+            except Exception:
+                return False
+            if not strokes:
+                return False
+            transformed = [[tp(pt) for pt in stroke] for stroke in strokes]
+            if not all(_is_finite_point(p) for stroke in transformed for p in stroke):
+                return False
+            new_annot = dst_page.add_ink_annot(transformed)
+        elif subtype == "FreeText":
+            rect = src_annot.rect * matrix
+            if not _is_finite_rect(rect):
+                return False
+            text = (src_annot.info or {}).get("content", "") or ""
+            new_annot = dst_page.add_freetext_annot(rect, text)
+        elif subtype in ("Highlight", "StrikeOut", "Underline", "Squiggly"):
+            quads = src_annot.vertices
+            if not quads or len(quads) < 4:
+                return False
+            # vertices: 4개씩 끊어서 quad 단위로 변환
+            flat = [tp(pt) for pt in quads]
+            if not all(_is_finite_point(p) for p in flat):
+                return False
+            if subtype == "Highlight":
+                new_annot = dst_page.add_highlight_annot(flat)
+            elif subtype == "StrikeOut":
+                new_annot = dst_page.add_strikeout_annot(flat)
+            elif subtype == "Underline":
+                new_annot = dst_page.add_underline_annot(flat)
+            else:
+                new_annot = dst_page.add_squiggly_annot(flat)
         else:
-            new_annot = dst_page.add_polygon_annot(pts)
-    elif subtype == "Ink":
-        try:
-            strokes = src_annot.ink_list
-        except Exception:
             return False
-        if not strokes:
-            return False
-        transformed = [[tp(pt) for pt in stroke] for stroke in strokes]
-        new_annot = dst_page.add_ink_annot(transformed)
-    elif subtype == "FreeText":
-        rect = src_annot.rect * matrix
-        text = (src_annot.info or {}).get("content", "") or ""
-        new_annot = dst_page.add_freetext_annot(rect, text)
-    elif subtype in ("Highlight", "StrikeOut", "Underline", "Squiggly"):
-        quads = src_annot.vertices
-        if not quads or len(quads) < 4:
-            return False
-        # vertices: 4개씩 끊어서 quad 단위로 변환
-        flat = [tp(pt) for pt in quads]
-        if subtype == "Highlight":
-            new_annot = dst_page.add_highlight_annot(flat)
-        elif subtype == "StrikeOut":
-            new_annot = dst_page.add_strikeout_annot(flat)
-        elif subtype == "Underline":
-            new_annot = dst_page.add_underline_annot(flat)
-        else:
-            new_annot = dst_page.add_squiggly_annot(flat)
-    else:
+    except Exception:
         return False
 
     if new_annot is None:
