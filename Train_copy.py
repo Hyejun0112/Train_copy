@@ -37,10 +37,8 @@ filter_color     = ""   # RGB hex, 예: "0000FF"
 filter_date_limit = ""  # "YYYY-MM-DD" (이 날짜까지 작성된 마크업만 포함)
 filter_author    = ""   # 작성자(사번)
 
-# 위치 보정 설정 (도면 레이아웃이 다른 경우)
+# 위치 보정 설정 (도면 레이아웃이 다른 경우) — 도면 테두리 자동 탐지로 기준점 계산
 pos_correction_enabled = False
-anchor_tag1 = ""
-anchor_tag2 = ""
 
 
 def _list_pdfs(path: str) -> list:
@@ -309,24 +307,55 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 #  위치 보정 (도면 레이아웃이 다른 경우) — PyMuPDF 직접 복사
 # ══════════════════════════════════════════════════════════
 
-def _find_tag_center(doc, tag: str, log_fn=None):
-    """문서 전체 페이지에서 tag 텍스트를 검색해 (page_index, (x, y)) 반환.
-    못 찾으면 None. 여러 개 발견 시 첫 번째 매치 사용 + 경고 로그."""
-    total_hits = 0
-    first = None
-    for page in doc:
-        hits = page.search_for(tag)
-        if hits:
-            total_hits += len(hits)
-            if first is None:
-                r = hits[0]
-                first = (page.number, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
-    if first is None:
+def _find_border_rect(page):
+    """페이지에서 가장 큰 사각형(도면 테두리로 추정)을 벡터 드로잉에서 탐지.
+    못 찾으면 None."""
+    page_rect = page.rect
+    page_area = page_rect.width * page_rect.height
+    if page_area <= 0:
         return None
-    if total_hits > 1 and log_fn:
-        log_fn(f"  [위치 보정] ⚠ '{tag}' 가 {total_hits}번 발견됨 → 첫 번째 매치 사용 (기준점이 부정확할 수 있음, 더 고유한 텍스트 권장)\n")
-    page_idx, x, y = first
-    return page_idx, (x, y)
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return None
+
+    candidates = []
+    # 1순위: 명시적 사각형(re) 드로잉 명령
+    for d in drawings:
+        for item in d.get("items", []):
+            if item[0] == "re":
+                rect = fitz.Rect(item[1])
+                area = abs(rect.width * rect.height)
+                if 0 < area <= page_area * 0.995:
+                    candidates.append(rect)
+
+    # 2순위: 사각형 명령이 없으면 드로잉 bbox 중 가장 큰 것(전체 페이지 제외)
+    if not candidates:
+        for d in drawings:
+            r = d.get("rect")
+            if r is None:
+                continue
+            rect = fitz.Rect(r)
+            area = abs(rect.width * rect.height)
+            if 0 < area <= page_area * 0.995:
+                candidates.append(rect)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda r: r.width * r.height, reverse=True)
+    return candidates[0]
+
+
+def _find_border_anchor_points(doc):
+    """문서에서 도면 테두리(가장 큰 사각형)를 찾아 두 꼭짓점을 기준점으로 반환.
+    반환: (page_index, top_left(x,y), bottom_right(x,y)) — 못 찾으면 None"""
+    for page in doc:
+        rect = _find_border_rect(page)
+        if rect:
+            return page.number, (rect.x0, rect.y0), (rect.x1, rect.y1)
+    return None
 
 
 def _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2):
@@ -490,10 +519,10 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
     return True
 
 
-def copy_markups_with_position_correction(src_path, dst_path, out_path,
-                                           tag1, tag2, log_fn=None):
+def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=None):
     """도면 레이아웃이 다른 경우: Bluebeam 자동화 없이 PyMuPDF로 직접
     마크업 좌표를 보정해서 Target(→Output)에 복사한다.
+    기준점은 도면 테두리(가장 큰 사각형)의 두 꼭짓점을 자동 탐지해서 사용 — 수동 입력 불필요.
     반환: (copied, skipped) 마크업 개수"""
     def log(msg):
         if log_fn:
@@ -505,28 +534,22 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path,
     src_doc = fitz.open(src_path)
     dst_doc = fitz.open(dst_path)
 
-    src_hit = _find_tag_center(src_doc, tag1, log_fn)
-    src_hit2 = _find_tag_center(src_doc, tag2, log_fn)
-    dst_hit = _find_tag_center(dst_doc, tag1, log_fn)
-    dst_hit2 = _find_tag_center(dst_doc, tag2, log_fn)
+    src_border = _find_border_anchor_points(src_doc)
+    dst_border = _find_border_anchor_points(dst_doc)
 
-    if not (src_hit and src_hit2 and dst_hit and dst_hit2):
+    if not (src_border and dst_border):
         src_doc.close()
         dst_doc.close()
         missing = []
-        if not src_hit:  missing.append(f"Source에서 '{tag1}' 못 찾음")
-        if not src_hit2: missing.append(f"Source에서 '{tag2}' 못 찾음")
-        if not dst_hit:  missing.append(f"Target에서 '{tag1}' 못 찾음")
-        if not dst_hit2: missing.append(f"Target에서 '{tag2}' 못 찾음")
-        raise RuntimeError("기준 태그를 찾지 못했습니다: " + ", ".join(missing))
+        if not src_border: missing.append("Source에서 도면 테두리를 찾지 못함")
+        if not dst_border: missing.append("Target에서 도면 테두리를 찾지 못함")
+        raise RuntimeError("위치 보정 실패: " + ", ".join(missing))
 
-    src_page_idx, src_p1 = src_hit
-    _, src_p2 = src_hit2
-    dst_page_idx, dst_p1 = dst_hit
-    _, dst_p2 = dst_hit2
+    src_page_idx, src_p1, src_p2 = src_border
+    dst_page_idx, dst_p1, dst_p2 = dst_border
 
     matrix = _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2)
-    log(f"  [위치 보정] 변환 행렬 계산 완료 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
+    log(f"  [위치 보정] 테두리 기준 변환 행렬 계산 완료 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
@@ -550,19 +573,19 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path,
     return copied, skipped
 
 
-def _position_correction_subprocess_main(src_path, dst_path, out_path, tag1, tag2, result_queue):
+def _position_correction_subprocess_main(src_path, dst_path, out_path, result_queue):
     """별도 프로세스에서 실행되는 진입점. PyMuPDF 네이티브 크래시가 나도
     이 프로세스만 죽고 메인 GUI 프로세스는 영향받지 않는다."""
     try:
         copied, skipped = copy_markups_with_position_correction(
-            src_path, dst_path, out_path, tag1, tag2, log_fn=None
+            src_path, dst_path, out_path, log_fn=None
         )
         result_queue.put(("ok", copied, skipped))
     except Exception as e:
         result_queue.put(("error", str(e)))
 
 
-def run_position_correction_isolated(src_path, dst_path, out_path, tag1, tag2,
+def run_position_correction_isolated(src_path, dst_path, out_path,
                                      log_fn=None, timeout=90):
     """위치 보정을 별도 프로세스에서 실행해 네이티브 크래시로부터 메인 앱을 보호한다."""
     def log(msg):
@@ -573,7 +596,7 @@ def run_position_correction_isolated(src_path, dst_path, out_path, tag1, tag2,
     result_queue = ctx.Queue()
     proc = ctx.Process(
         target=_position_correction_subprocess_main,
-        args=(src_path, dst_path, out_path, tag1, tag2, result_queue),
+        args=(src_path, dst_path, out_path, result_queue),
     )
     proc.start()
     proc.join(timeout)
@@ -589,7 +612,7 @@ def run_position_correction_isolated(src_path, dst_path, out_path, tag1, tag2,
         exitcode = proc.exitcode
         raise RuntimeError(
             f"위치 보정 작업이 비정상 종료되었습니다 (exit code {exitcode}). "
-            "PyMuPDF 내부 오류로 추정됩니다. 기준 태그를 다른 텍스트로 바꿔보세요."
+            "PyMuPDF 내부 오류로 추정됩니다. 해당 도면에 테두리가 명확한지 확인하세요."
         )
 
     status = result[0]
@@ -920,26 +943,15 @@ class App(tk.Tk):
             activeforeground="#cdd6f4", wraplength=280, justify="left"
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(2, 4))
 
-        def _entry_row(r, label, width=24):
-            tk.Label(frm, text=label, font=("Segoe UI", 8),
-                     fg="#6c7086", bg="#1e1e2e", anchor="w", width=10
-                     ).grid(row=r, column=0, sticky="w")
-            e = tk.Entry(frm, width=width, bg="#181825", fg="#cdd6f4",
-                          insertbackground="#cdd6f4", relief="flat")
-            e.grid(row=r, column=1, sticky="ew", padx=4, pady=1)
-            return e
-
-        self.ent_anchor1 = _entry_row(1, "기준 태그 1")
-        self.ent_anchor2 = _entry_row(2, "기준 태그 2")
-
         tk.Label(
             frm,
-            text="※ Source/Target 도면에 공통으로 존재하는 텍스트(예: 1004, 1009)\n"
-                 "   두 개를 입력하면 좌표 차이를 계산해 마크업 위치를 보정합니다.\n"
-                 "   (이동 + 회전 + 스케일까지 보정, Bluebeam 자동화 없이 직접 적용)",
+            text="※ 도면 테두리(가장 큰 사각형)를 자동으로 찾아\n"
+                 "   기준점으로 사용합니다. 별도 입력 불필요.\n"
+                 "   (이동 + 회전 + 스케일까지 보정, Bluebeam 자동화 없이 직접 적용)\n"
+                 "   ※ Source/Target 모두 동일한 표제란/테두리 양식 필요",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
     def _file_listbox(self, notebook: ttk.Notebook, tab_name: str) -> tk.Listbox:
         """탭 내 스크롤 가능한 파일 목록 Listbox 생성"""
@@ -1403,7 +1415,7 @@ class App(tk.Tk):
     def _start_run(self):
         global stop_flag, filter_enabled, filter_color
         global filter_date_limit, filter_author
-        global pos_correction_enabled, anchor_tag1, anchor_tag2
+        global pos_correction_enabled
         if not mapping:
             messagebox.showwarning("매핑 없음", "먼저 '매핑 편집'에서 확정하세요.")
             return
@@ -1417,8 +1429,6 @@ class App(tk.Tk):
         filter_author    = self.ent_author.get().strip()
 
         pos_correction_enabled = self.var_pos_correction.get()
-        anchor_tag1 = self.ent_anchor1.get().strip()
-        anchor_tag2 = self.ent_anchor2.get().strip()
 
         if filter_enabled or pos_correction_enabled:
             if fitz is None:
@@ -1428,13 +1438,6 @@ class App(tk.Tk):
                     "터미널에서 'pip install PyMuPDF' 실행 후 다시 시도하세요."
                 )
                 return
-
-        if pos_correction_enabled and not (anchor_tag1 and anchor_tag2):
-            messagebox.showwarning(
-                "기준 태그 필요",
-                "위치 보정을 사용하려면 기준 태그 1, 2를 모두 입력하세요."
-            )
-            return
 
         stop_flag = False
         self._set_status("실행 중…", "#a6e3a1")
@@ -1614,7 +1617,7 @@ class App(tk.Tk):
             start_time = time.time()
             try:
                 copied, skipped = run_position_correction_isolated(
-                    open_src, dst_path, out_path, anchor_tag1, anchor_tag2, self._log
+                    open_src, dst_path, out_path, self._log
                 )
                 report_rows.append({
                     "source": src_name2, "target": dst_name, "output": dst_name,
