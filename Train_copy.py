@@ -307,15 +307,24 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 #  위치 보정 (도면 레이아웃이 다른 경우) — PyMuPDF 직접 복사
 # ══════════════════════════════════════════════════════════
 
-def _find_tag_center(doc, tag: str):
+def _find_tag_center(doc, tag: str, log_fn=None):
     """문서 전체 페이지에서 tag 텍스트를 검색해 (page_index, (x, y)) 반환.
-    못 찾으면 None. 여러 개 발견 시 첫 번째 매치 사용."""
+    못 찾으면 None. 여러 개 발견 시 첫 번째 매치 사용 + 경고 로그."""
+    total_hits = 0
+    first = None
     for page in doc:
         hits = page.search_for(tag)
         if hits:
-            r = hits[0]
-            return page.number, ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
-    return None
+            total_hits += len(hits)
+            if first is None:
+                r = hits[0]
+                first = (page.number, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+    if first is None:
+        return None
+    if total_hits > 1 and log_fn:
+        log_fn(f"  [위치 보정] ⚠ '{tag}' 가 {total_hits}번 발견됨 → 첫 번째 매치 사용 (기준점이 부정확할 수 있음, 더 고유한 텍스트 권장)\n")
+    page_idx, x, y = first
+    return page_idx, (x, y)
 
 
 def _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2):
@@ -449,10 +458,10 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path,
     src_doc = fitz.open(src_path)
     dst_doc = fitz.open(dst_path)
 
-    src_hit = _find_tag_center(src_doc, tag1)
-    src_hit2 = _find_tag_center(src_doc, tag2)
-    dst_hit = _find_tag_center(dst_doc, tag1)
-    dst_hit2 = _find_tag_center(dst_doc, tag2)
+    src_hit = _find_tag_center(src_doc, tag1, log_fn)
+    src_hit2 = _find_tag_center(src_doc, tag2, log_fn)
+    dst_hit = _find_tag_center(dst_doc, tag1, log_fn)
+    dst_hit2 = _find_tag_center(dst_doc, tag2, log_fn)
 
     if not (src_hit and src_hit2 and dst_hit and dst_hit2):
         src_doc.close()
