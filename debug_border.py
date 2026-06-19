@@ -19,9 +19,29 @@ except ImportError:
     sys.exit(1)
 
 
+def edges_of_item(item):
+    """item에서 (p1, p2) 직선 변들을 추출 (re는 4변으로, qu는 4변으로 분해)"""
+    op = item[0]
+    if op == "l":
+        return [(item[1], item[2])]
+    if op == "re":
+        r = fitz.Rect(item[1])
+        tl, tr = fitz.Point(r.x0, r.y0), fitz.Point(r.x1, r.y0)
+        bl, br = fitz.Point(r.x0, r.y1), fitz.Point(r.x1, r.y1)
+        return [(tl, tr), (tr, br), (br, bl), (bl, tl)]
+    if op == "qu":
+        try:
+            pts = list(item[1])
+        except Exception:
+            return []
+        return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+    return []
+
+
 def find_border_rect(page, log_prefix=""):
     page_rect = page.rect
-    page_area = page_rect.width * page_rect.height
+    page_w, page_h = page_rect.width, page_rect.height
+    page_area = page_w * page_h
     if page_area <= 0:
         return None
 
@@ -33,9 +53,33 @@ def find_border_rect(page, log_prefix=""):
 
     print(f"{log_prefix}  드로잉 객체 수: {len(drawings)}")
 
-    MIN_FRAC = 0.3
-    MAX_FRAC = 0.995
+    TOL = 1.0
+    LEN_FRAC = 0.7
 
+    horiz_ys = []
+    vert_xs = []
+    for d in drawings:
+        for item in d.get("items", []):
+            for p1, p2 in edges_of_item(item):
+                dx = abs(p2.x - p1.x)
+                dy = abs(p2.y - p1.y)
+                if dy <= TOL and dx >= page_w * LEN_FRAC:
+                    horiz_ys.append((p1.y + p2.y) / 2)
+                elif dx <= TOL and dy >= page_h * LEN_FRAC:
+                    vert_xs.append((p1.x + p2.x) / 2)
+
+    print(f"{log_prefix}  페이지 너비의 {LEN_FRAC*100:.0f}% 이상인 가로선: {len(horiz_ys)}개, "
+          f"높이의 {LEN_FRAC*100:.0f}% 이상인 세로선: {len(vert_xs)}개")
+
+    if horiz_ys and vert_xs:
+        rect = fitz.Rect(min(vert_xs), min(horiz_ys), max(vert_xs), max(horiz_ys))
+        print(f"{log_prefix}  [긴 직선 기반] 후보 Border: {rect}  (w={rect.width:.1f}, h={rect.height:.1f})")
+        if rect.width > page_w * 0.3 and rect.height > page_h * 0.3:
+            return rect
+        print(f"{log_prefix}  → 너무 작아서 폐기, fallback 사용")
+
+    # ── fallback ──
+    MIN_FRAC, MAX_FRAC = 0.3, 0.995
     candidates = []
     re_count = 0
     for d in drawings:
@@ -46,7 +90,6 @@ def find_border_rect(page, log_prefix=""):
                 area = abs(rect.width * rect.height)
                 if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
                     candidates.append(rect)
-
     bbox_count = 0
     for d in drawings:
         r = d.get("rect")
@@ -58,15 +101,13 @@ def find_border_rect(page, log_prefix=""):
         if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
             candidates.append(rect)
 
-    print(f"{log_prefix}  명시적 사각형('re') 개수: {re_count}, path bbox 개수: {bbox_count}, "
+    print(f"{log_prefix}  [fallback] 명시적 사각형('re') 개수: {re_count}, path bbox 개수: {bbox_count}, "
           f"후보(면적 {MIN_FRAC*100:.0f}%~{MAX_FRAC*100:.0f}%): {len(candidates)}")
 
     if not candidates:
         return None
 
     candidates.sort(key=lambda r: r.width * r.height, reverse=True)
-
-    # 상위 5개 후보 크기 출력 (어떤 사각형이 선택되는지 확인용)
     print(f"{log_prefix}  상위 후보(최대 5개):")
     for i, r in enumerate(candidates[:5]):
         print(f"{log_prefix}    [{i}] {r}  (w={r.width:.1f}, h={r.height:.1f})")

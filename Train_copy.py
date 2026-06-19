@@ -308,15 +308,18 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 # ══════════════════════════════════════════════════════════
 
 def _find_border_rect(page):
-    """페이지에서 가장 큰 사각형(도면 테두리로 추정)을 벡터 드로잉에서 탐지.
+    """페이지에서 도면 테두리(가장 바깥쪽 큰 사각형)를 탐지.
     못 찾으면 None.
-    테두리가 명시적 're' 명령으로 그려진 경우와, 4개의 선(line)으로 그려진
-    경우(이 때는 path 전체의 bbox가 테두리 크기) 모두 후보로 모아서
-    가장 큰 사각형을 선택한다. 너무 작은 사각형(아이콘 등)과 페이지 전체
-    크기인 사각형(배경)은 제외한다."""
+
+    테두리는 보통 페이지 가로/세로를 거의 가득 채우는 긴 직선 4개(상/하/좌/우)
+    또는 명시적 사각형(re)으로 그려진다. 이 직선/사각형들의 변(edge)을 모두
+    모아서, 페이지 너비의 대부분을 가로지르는 가로선들과 페이지 높이의
+    대부분을 가로지르는 세로선들의 바깥쪽 끝(min/max)으로 테두리를 구성한다.
+    (path 전체의 bbox만 보면 테두리가 여러 개의 분리된 드로잉 객체로
+    나뉘어 있을 때 일부만 잡히므로, 변 단위로 모아서 바깥 경계를 계산한다.)"""
     page_rect = page.rect
-    page_area = page_rect.width * page_rect.height
-    if page_area <= 0:
+    page_w, page_h = page_rect.width, page_rect.height
+    if page_w <= 0 or page_h <= 0:
         return None
 
     try:
@@ -324,12 +327,49 @@ def _find_border_rect(page):
     except Exception:
         return None
 
-    MIN_FRAC = 0.3    # 페이지 면적의 30% 이상이어야 "테두리"로 간주
-    MAX_FRAC = 0.995   # 페이지 전체 크기(배경)는 제외
+    TOL = 1.0           # 가로/세로로 간주할 좌표 허용 오차(pt)
+    LEN_FRAC = 0.7       # 페이지 너비/높이의 70% 이상이어야 "테두리 변"으로 간주
 
+    def edges_of_item(item):
+        """item에서 (p1, p2) 직선 변들을 추출 (re는 4변으로 분해)"""
+        op = item[0]
+        if op == "l":
+            return [(item[1], item[2])]
+        if op == "re":
+            r = fitz.Rect(item[1])
+            tl, tr = fitz.Point(r.x0, r.y0), fitz.Point(r.x1, r.y0)
+            bl, br = fitz.Point(r.x0, r.y1), fitz.Point(r.x1, r.y1)
+            return [(tl, tr), (tr, br), (br, bl), (bl, tl)]
+        if op == "qu":
+            try:
+                pts = list(item[1])
+            except Exception:
+                return []
+            return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+        return []
+
+    horiz_ys = []   # 긴 가로선의 y 좌표
+    vert_xs = []    # 긴 세로선의 x 좌표
+
+    for d in drawings:
+        for item in d.get("items", []):
+            for p1, p2 in edges_of_item(item):
+                dx = abs(p2.x - p1.x)
+                dy = abs(p2.y - p1.y)
+                if dy <= TOL and dx >= page_w * LEN_FRAC:
+                    horiz_ys.append((p1.y + p2.y) / 2)
+                elif dx <= TOL and dy >= page_h * LEN_FRAC:
+                    vert_xs.append((p1.x + p2.x) / 2)
+
+    if horiz_ys and vert_xs:
+        rect = fitz.Rect(min(vert_xs), min(horiz_ys), max(vert_xs), max(horiz_ys))
+        if rect.width > page_w * 0.3 and rect.height > page_h * 0.3:
+            return rect
+
+    # ── fallback: 긴 직선 기반 탐지가 안 되면 사각형/bbox 후보 중 가장 큰 것 ──
+    page_area = page_w * page_h
+    MIN_FRAC, MAX_FRAC = 0.3, 0.995
     candidates = []
-
-    # 1) 명시적 사각형(re) 드로잉 명령
     for d in drawings:
         for item in d.get("items", []):
             if item[0] == "re":
@@ -337,8 +377,6 @@ def _find_border_rect(page):
                 area = abs(rect.width * rect.height)
                 if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
                     candidates.append(rect)
-
-    # 2) 선(line) 4개로 그려진 사각 테두리 등 — path 전체의 bbox 사용
     for d in drawings:
         r = d.get("rect")
         if r is None:
@@ -350,7 +388,6 @@ def _find_border_rect(page):
 
     if not candidates:
         return None
-
     candidates.sort(key=lambda r: r.width * r.height, reverse=True)
     return candidates[0]
 
