@@ -421,7 +421,10 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
     colors = src_annot.colors or {}
     stroke = colors.get("stroke")
     fill = colors.get("fill")
-    width = (src_annot.border or {}).get("width", 1) or 1
+    border_info = src_annot.border or {}
+    width = border_info.get("width", 1) or 1
+    clouds = border_info.get("clouds", 0) or 0
+    dashes = border_info.get("dashes") or None
     opacity = src_annot.opacity if src_annot.opacity is not None else 1
 
     def tp(pt):
@@ -510,7 +513,18 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
             col_kwargs["fill"] = fill
         if col_kwargs:
             new_annot.set_colors(**col_kwargs)
-        new_annot.set_border(width=width)
+
+        scale = math.hypot(matrix.a, matrix.b)
+        border_kwargs = {"width": width * scale}
+        if dashes:
+            border_kwargs["dashes"] = dashes
+        if clouds and subtype in ("Square", "Circle", "Polygon", "PolyLine"):
+            border_kwargs["clouds"] = clouds
+        try:
+            new_annot.set_border(**border_kwargs)
+        except Exception:
+            new_annot.set_border(width=width * scale)
+
         new_annot.set_opacity(opacity)
         new_annot.update()
     except Exception:
