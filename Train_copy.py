@@ -361,49 +361,22 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
     return None
 
 
-def _fit_similarity_matrix(pairs):
-    """여러 개의 (src_pt, dst_pt) 매칭 쌍으로 이동+회전+스케일을 포함한
-    2D 유사변환 행렬(fitz.Matrix)을 최소제곱으로 계산한다.
-    매칭 쌍이 4개 이상이면 잔차가 큰 이상치를 1회 걸러내고 재계산한다."""
-    if len(pairs) < 2:
-        raise ValueError("매칭된 Tag가 2개 미만이라 위치 보정을 계산할 수 없습니다.")
-
-    def fit(pts):
-        s = [complex(*p[0]) for p in pts]
-        d = [complex(*p[1]) for p in pts]
-        n = len(s)
-        s_mean = sum(s) / n
-        d_mean = sum(d) / n
-        den = sum(abs(si - s_mean) ** 2 for si in s)
-        if den < 25:  # 기준점들이 거의 한 점에 몰려 있음 (분산 < 5pt^2 수준)
-            raise ValueError("매칭된 Tag들의 위치가 서로 너무 가깝습니다.")
-        num = sum((si - s_mean).conjugate() * (di - d_mean) for si, di in zip(s, d))
-        k = num / den
-        t = d_mean - k * s_mean
-        return k, t
-
-    k, t = fit(pairs)
-
-    if len(pairs) >= 4:
-        residuals = [abs(k * complex(*sp) + t - complex(*dp)) for sp, dp in pairs]
-        med = sorted(residuals)[len(residuals) // 2]
-        threshold = max(med * 4, 10)
-        filtered = [p for p, r in zip(pairs, residuals) if r <= threshold]
-        if 2 <= len(filtered) < len(pairs):
-            k, t = fit(filtered)
-
-    a, b = k.real, k.imag
-    e, f = t.real, t.imag
-    if not all(math.isfinite(v) for v in (a, b, e, f)):
-        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
-
-    scale = abs(k)
-    if scale < 0.1 or scale > 10:
-        raise ValueError(
-            f"계산된 스케일({scale:.2f}배)이 비정상적입니다. "
-            "Tag 매칭이 잘못되었을 가능성이 높습니다."
-        )
-    return fitz.Matrix(a, b, -b, a, e, f)
+def _local_offset_matrix(pt, pairs, k=3):
+    """pt(소스 좌표) 근처의 매칭된 Tag k개(거리 역제곱 가중)를 이용해
+    그 지역의 실제 이동량만큼만 평행이동하는 행렬을 만든다.
+    도면이 전체적으로 하나의 회전/스케일로 맞지 않고 구역마다 CAD 배치가
+    달라진 경우, 전역 변환보다 마크업 주변의 국소 이동량을 쓰는 게 더 정확하다."""
+    p = complex(*pt)
+    dists = sorted(
+        ((abs(complex(*sp) - p), sp, dp) for sp, dp in pairs),
+        key=lambda t: t[0]
+    )
+    chosen = dists[:max(1, min(k, len(dists)))]
+    weights = [1.0 / (d * d + 1.0) for d, _, _ in chosen]
+    wsum = sum(weights)
+    dx = sum(w * (dp[0] - sp[0]) for w, (_, sp, dp) in zip(weights, chosen)) / wsum
+    dy = sum(w * (dp[1] - sp[1]) for w, (_, sp, dp) in zip(weights, chosen)) / wsum
+    return fitz.Matrix(1, 0, 0, 1, dx, dy)
 
 
 def _is_finite_point(pt) -> bool:
@@ -570,15 +543,17 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         )
 
     src_page_idx, dst_page_idx, pairs = match_result
-    matrix = _fit_similarity_matrix(pairs)
-    log(f"  [위치 보정] Tag {len(pairs)}개 기준 변환 행렬 계산 완료 "
-        f"(Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
+    log(f"  [위치 보정] Tag {len(pairs)}개 매칭 완료 — 마크업마다 가까운 Tag 기준 "
+        f"국소 이동 보정 적용 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
 
     copied, skipped = 0, 0
     for annot in src_page.annots() or []:
+        rect = annot.rect
+        anchor = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+        matrix = _local_offset_matrix(anchor, pairs)
         ok = _copy_annot_with_transform(annot, dst_page, matrix)
         if ok:
             copied += 1
