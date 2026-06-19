@@ -336,23 +336,25 @@ def _extract_tag_suffixes(page):
     return {k: v for k, v in suffix_map.items() if v is not None}
 
 
-# 계측기 등 일반 Tag (예: "PI-0101") — Train 번호와 무관하게 Source/Target에서
-# 보통 동일한 문자가 그대로 유지된다. 이런 Tag는 Train 번호 Tag보다 도면 전체에
-# 훨씬 빽빽하게 분포하므로, 마크업 바로 옆의 동일 Tag를 기준점으로 쓰면 국소
-# 보정 정확도가 올라간다.
-# 단, 밸브 Tag(GV, BFV, CV, BV, PV, RV, SV, TV, FV, NV, XV, AOV, MOV, SOV, PSV 등)는
+# 계측기/제어밸브/On-off 밸브/Logic/OPC 등 일반 Tag (예: "PI-0101", "CV-0022",
+# "XV-0011", "LSH-101", "B-101") — Train 번호와 무관하게 Source/Target에서
+# 보통 동일한 문자가 그대로 유지된다. 이런 Tag는 Train 번호 Tag(배관선번호)보다
+# 도면 전체에 훨씬 빽빽하게 분포하므로, 마크업 바로 옆의 동일 Tag를 기준점으로
+# 쓰면 국소 보정 정확도가 올라간다.
+# 단, "수동(Manual) 밸브" Tag(GV, BFV, BV, GLV, PLV, NRV, CKV, DV 등)는
 # Train Copy마다 번호가 별도로 매겨지므로 같은 번호라도 다른 설비를 가리킬 수
-# 있다 — 기준점에서 반드시 제외해야 한다.
+# 있어 기준점에서 제외해야 한다. 반면 Control Valve(CV)나 On/off Valve(XV, SOV,
+# AOV, MOV 등)는 Loop/Logic 번호에 종속돼 있어 그대로 유지되므로 사용 가능하다.
 _GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
-_VALVE_PREFIX_RE = re.compile(
-    r'^(?:AOV|MOV|SOV|PSV|BFV|GV|CV|BV|PV|RV|SV|TV|FV|NV|XV|V)-', re.IGNORECASE
+_MANUAL_VALVE_PREFIX_RE = re.compile(
+    r'^(?:GLV|PLV|NRV|CKV|BFV|GV|BV|DV)-', re.IGNORECASE
 )
 
 
 def _extract_generic_tags(page):
-    """페이지에서 일반 계측 Tag 텍스트를 추출해 텍스트별 위치(중심점)를
-    반환. 밸브 Tag는 Train Copy마다 번호가 달라질 수 있어 제외하고,
-    같은 텍스트가 페이지에 여러 번 나오면 모호하므로 매칭에서 제외한다."""
+    """페이지에서 일반 계측/제어밸브/Logic/OPC Tag 텍스트를 추출해 텍스트별
+    위치(중심점)를 반환. 수동 밸브 Tag는 Train Copy마다 번호가 달라질 수 있어
+    제외하고, 같은 텍스트가 페이지에 여러 번 나오면 모호하므로 매칭에서 제외한다."""
     text_map = {}
     try:
         words = page.get_text("words")
@@ -362,7 +364,7 @@ def _extract_generic_tags(page):
         x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
         if not _GENERIC_TAG_RE.match(text):
             continue
-        if _VALVE_PREFIX_RE.match(text):
+        if _MANUAL_VALVE_PREFIX_RE.match(text):
             continue
         center = ((x0 + x1) / 2, (y0 + y1) / 2)
         if text in text_map:
@@ -372,11 +374,50 @@ def _extract_generic_tags(page):
     return {k: v for k, v in text_map.items() if v is not None}
 
 
+# Symbol(벡터 도형) 기준점: 작은 벡터 도형 묶음(밸브/계측기 심볼 등)을 묶어
+# (도형 path 개수, bbox 가로/세로 크기)로 모양 시그니처를 만들고, 그 시그니처가
+# 페이지에 단 한 번만 나오는 경우만 기준점으로 사용한다(Tag 텍스트가 없는
+# 심볼도 위치 보정에 활용 가능).
+_SYMBOL_MAX_SIZE = 60  # pt — 이보다 크면 개별 심볼이 아닌 배경/라인 묶음으로 간주해 제외
+
+
+def _extract_symbol_signatures(page):
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return {}
+    sig_map = {}
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None or rect.width <= 0 or rect.height <= 0:
+            continue
+        if rect.width > _SYMBOL_MAX_SIZE or rect.height > _SYMBOL_MAX_SIZE:
+            continue
+        items = d.get("items", [])
+        sig = (len(items), round(rect.width, 1), round(rect.height, 1))
+        center = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+        if sig in sig_map:
+            sig_map[sig] = None
+        else:
+            sig_map[sig] = center
+    return {k: v for k, v in sig_map.items() if v is not None}
+
+
+def _border_corner_anchors(src_page, dst_page):
+    """Source/Target 페이지 크기를 기준점(네 모서리)으로 추가한다. 도면 안쪽에
+    매칭된 Tag/Symbol이 없는 외곽 영역의 마크업에 대한 안전한 보조 기준점
+    역할을 한다(Source/Target 페이지 크기가 같으면 이동량 0으로 반영됨)."""
+    sr, dr = src_page.rect, dst_page.rect
+    s_corners = [(sr.x0, sr.y0), (sr.x1, sr.y0), (sr.x0, sr.y1), (sr.x1, sr.y1)]
+    d_corners = [(dr.x0, dr.y0), (dr.x1, dr.y0), (dr.x0, dr.y1), (dr.x1, dr.y1)]
+    return list(zip(s_corners, d_corners))
+
+
 def _find_tag_matches(src_doc, dst_doc, log_fn=None):
-    """Source/Target 문서에서 (1) Train 번호만 다른 동일 Tag(suffix), (2) 텍스트가
-    완전히 동일한 일반 계측/밸브 Tag를 자동으로 찾아 매칭한다. 수동 입력 불필요.
-    (2)를 함께 쓰면 기준점 밀도가 크게 늘어나, 마크업 바로 옆의 Tag를 기준으로
-    국소 보정할 수 있다.
+    """Source/Target 문서에서 (1) Train 번호만 다른 동일 Tag(배관선번호 suffix),
+    (2) 텍스트가 완전히 동일한 일반 계측/제어밸브/Logic/OPC Tag, (3) 모양이
+    동일한 Symbol(벡터 도형)을 자동으로 찾아 매칭하고, (4) 페이지 모서리를
+    보조 기준점으로 추가한다. 수동 입력 불필요.
     반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...]) — 못 찾으면 None"""
     def log(msg):
         if log_fn:
@@ -385,18 +426,25 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
     for sp in src_doc:
         src_map = _extract_tag_suffixes(sp)
         src_generic = _extract_generic_tags(sp)
-        if not src_map and not src_generic:
+        src_symbols = _extract_symbol_signatures(sp)
+        if not src_map and not src_generic and not src_symbols:
             continue
         for dp in dst_doc:
             dst_map = _extract_tag_suffixes(dp)
             dst_generic = _extract_generic_tags(dp)
+            dst_symbols = _extract_symbol_signatures(dp)
             common = sorted(set(src_map) & set(dst_map))
             common_generic = sorted(set(src_generic) & set(dst_generic))
-            if len(common) + len(common_generic) >= 2:
+            common_symbols = sorted(set(src_symbols) & set(dst_symbols))
+            total = len(common) + len(common_generic) + len(common_symbols)
+            if total >= 2:
                 pairs = [(src_map[s], dst_map[s]) for s in common]
                 pairs += [(src_generic[s], dst_generic[s]) for s in common_generic]
-                log(f"  [위치 보정] 자동 Tag 매칭 {len(pairs)}개 발견 "
-                    f"(Train 번호 Tag {len(common)}개 + 일반 Tag {len(common_generic)}개, "
+                pairs += [(src_symbols[s], dst_symbols[s]) for s in common_symbols]
+                pairs += _border_corner_anchors(sp, dp)
+                log(f"  [위치 보정] 자동 기준점 매칭 {total}개 발견 "
+                    f"(배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
+                    f"Symbol {len(common_symbols)}개, 모서리 4개 보조 추가, "
                     f"Source p{sp.number + 1} → Target p{dp.number + 1})\n")
                 for s in common[:10]:
                     log(f"    - {s}\n")
@@ -988,10 +1036,10 @@ class App(tk.Tk):
 
         tk.Label(
             frm,
-            text="※ Train 번호만 다르고 나머지는 동일한 Tag(배관선번호 등)를\n"
-                 "   Source/Target에서 자동으로 찾아 기준점으로 사용합니다.\n"
-                 "   별도 입력 불필요. (이동 + 회전 + 스케일까지 보정,\n"
-                 "   Bluebeam 자동화 없이 직접 적용)",
+            text="※ 배관선번호/계측기/제어밸브/Symbol/도면 모서리를 자동으로 찾아\n"
+                 "   기준점으로 사용합니다. 별도 입력 불필요. 마크업마다 가까운\n"
+                 "   기준점 기준으로 국소 위치 보정 적용 (수동 밸브 번호는 Train별로\n"
+                 "   달라져 기준점에서 제외, Bluebeam 자동화 없이 직접 적용)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))

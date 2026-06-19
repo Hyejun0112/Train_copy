@@ -56,12 +56,15 @@ def extract_tag_suffixes(page, log_prefix=""):
     return result
 
 
-# 계측기 등 일반 Tag (예: "PI-0101") — Train 번호와 무관하게 Source/Target에서
-# 동일한 문자가 그대로 유지되므로 기준점 밀도를 늘리는 데 쓴다.
-# 단, 밸브 Tag는 Train Copy마다 번호가 별도로 매겨지므로 제외한다.
+# 계측기/제어밸브/On-off 밸브/Logic/OPC 등 일반 Tag (예: "PI-0101", "CV-0022",
+# "XV-0011") — Train 번호와 무관하게 동일한 문자가 그대로 유지되므로 기준점
+# 밀도를 늘리는 데 쓴다.
+# 단, "수동(Manual) 밸브" Tag(GV, BFV, BV, GLV, PLV, NRV, CKV, DV 등)는
+# Train Copy마다 번호가 별도로 매겨지므로 제외한다. Control Valve(CV)나
+# On/off Valve(XV, SOV, AOV, MOV 등)는 사용 가능.
 GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
-VALVE_PREFIX_RE = re.compile(
-    r'^(?:AOV|MOV|SOV|PSV|BFV|GV|CV|BV|PV|RV|SV|TV|FV|NV|XV|V)-', re.IGNORECASE
+MANUAL_VALVE_PREFIX_RE = re.compile(
+    r'^(?:GLV|PLV|NRV|CKV|BFV|GV|BV|DV)-', re.IGNORECASE
 )
 
 
@@ -78,7 +81,7 @@ def extract_generic_tags(page, log_prefix=""):
         x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
         if not GENERIC_TAG_RE.match(text):
             continue
-        if VALVE_PREFIX_RE.match(text):
+        if MANUAL_VALVE_PREFIX_RE.match(text):
             continue
         center = ((x0 + x1) / 2, (y0 + y1) / 2)
         if text in text_map:
@@ -91,6 +94,40 @@ def extract_generic_tags(page, log_prefix=""):
     result = {k: v for k, v in text_map.items() if v is not None}
     print(f"{log_prefix}  일반 Tag 패턴에 매칭된 단어: {sum(1 for v in text_map.values())}개 항목, "
           f"고유 텍스트: {len(result)}개, 중복(모호함)으로 제외: {dup_count}개")
+    return result
+
+
+# Symbol(벡터 도형) 기준점: 작은 벡터 도형 묶음의 모양 시그니처가 페이지에 단 한
+# 번만 나오는 경우만 기준점으로 사용한다.
+SYMBOL_MAX_SIZE = 60  # pt
+
+
+def extract_symbol_signatures(page, log_prefix=""):
+    try:
+        drawings = page.get_drawings()
+    except Exception as e:
+        print(f"{log_prefix}  get_drawings() 실패: {e}")
+        return {}
+    sig_map = {}
+    dup_count = 0
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None or rect.width <= 0 or rect.height <= 0:
+            continue
+        if rect.width > SYMBOL_MAX_SIZE or rect.height > SYMBOL_MAX_SIZE:
+            continue
+        items = d.get("items", [])
+        sig = (len(items), round(rect.width, 1), round(rect.height, 1))
+        center = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+        if sig in sig_map:
+            if sig_map[sig] is not None:
+                dup_count += 1
+            sig_map[sig] = None
+        else:
+            sig_map[sig] = center
+    result = {k: v for k, v in sig_map.items() if v is not None}
+    print(f"{log_prefix}  Symbol 후보(작은 벡터 도형): {len(drawings)}개 중 크기 필터 통과, "
+          f"고유 시그니처: {len(result)}개, 중복(모호함)으로 제외: {dup_count}개")
     return result
 
 
@@ -112,19 +149,24 @@ def main():
         print(f"\n[SOURCE] 페이지 {sp.number} 크기: {sp.rect}")
         src_map = extract_tag_suffixes(sp, log_prefix="[SOURCE]")
         src_generic = extract_generic_tags(sp, log_prefix="[SOURCE]")
-        if not src_map and not src_generic:
+        src_symbols = extract_symbol_signatures(sp, log_prefix="[SOURCE]")
+        if not src_map and not src_generic and not src_symbols:
             continue
         for dp in dst_doc:
             print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
             dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
             dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
+            dst_symbols = extract_symbol_signatures(dp, log_prefix="[TARGET]")
             common = sorted(set(src_map) & set(dst_map))
             common_generic = sorted(set(src_generic) & set(dst_generic))
-            print(f"  >>> 공통 매칭 Tag: Train 번호 Tag {len(common)}개 + 일반 Tag {len(common_generic)}개 "
-                  f"= {len(common) + len(common_generic)}개")
-            if len(common) + len(common_generic) >= 2:
+            common_symbols = sorted(set(src_symbols) & set(dst_symbols), key=str)
+            total = len(common) + len(common_generic) + len(common_symbols)
+            print(f"  >>> 공통 매칭: 배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
+                  f"Symbol {len(common_symbols)}개 = {total}개")
+            if total >= 2:
                 matches = [(s, src_map[s], dst_map[s]) for s in common]
                 matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
+                matches += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
                 best = (sp.number, dp.number, matches)
                 break
         if best:
