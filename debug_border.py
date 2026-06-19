@@ -56,6 +56,39 @@ def extract_tag_suffixes(page, log_prefix=""):
     return result
 
 
+# 밸브/계측기/OPC 등 일반 Tag (예: "PI-0101", "GV-0202", "BFV-0003", "B-101") —
+# Train 번호와 무관하게 Source/Target에서 동일한 문자가 그대로 유지되며, Line이나
+# 밸브 바로 옆에 위치하므로 기준점 밀도를 늘리는 데 쓴다.
+GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
+
+
+def extract_generic_tags(page, log_prefix=""):
+    text_map = {}
+    dup_count = 0
+    try:
+        words = page.get_text("words")
+    except Exception as e:
+        print(f"{log_prefix}  get_text('words') 실패: {e}")
+        return {}
+
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        if not GENERIC_TAG_RE.match(text):
+            continue
+        center = ((x0 + x1) / 2, (y0 + y1) / 2)
+        if text in text_map:
+            if text_map[text] is not None:
+                dup_count += 1
+            text_map[text] = None
+        else:
+            text_map[text] = center
+
+    result = {k: v for k, v in text_map.items() if v is not None}
+    print(f"{log_prefix}  일반 Tag 패턴에 매칭된 단어: {sum(1 for v in text_map.values())}개 항목, "
+          f"고유 텍스트: {len(result)}개, 중복(모호함)으로 제외: {dup_count}개")
+    return result
+
+
 def main():
     if len(sys.argv) != 3:
         print("사용법: python debug_border.py <source.pdf> <target.pdf>")
@@ -73,15 +106,21 @@ def main():
     for sp in src_doc:
         print(f"\n[SOURCE] 페이지 {sp.number} 크기: {sp.rect}")
         src_map = extract_tag_suffixes(sp, log_prefix="[SOURCE]")
-        if not src_map:
+        src_generic = extract_generic_tags(sp, log_prefix="[SOURCE]")
+        if not src_map and not src_generic:
             continue
         for dp in dst_doc:
             print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
             dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
+            dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
             common = sorted(set(src_map) & set(dst_map))
-            print(f"  >>> 공통 매칭 Tag: {len(common)}개")
-            if len(common) >= 2:
-                best = (sp.number, dp.number, [(s, src_map[s], dst_map[s]) for s in common])
+            common_generic = sorted(set(src_generic) & set(dst_generic))
+            print(f"  >>> 공통 매칭 Tag: Train 번호 Tag {len(common)}개 + 일반 Tag {len(common_generic)}개 "
+                  f"= {len(common) + len(common_generic)}개")
+            if len(common) + len(common_generic) >= 2:
+                matches = [(s, src_map[s], dst_map[s]) for s in common]
+                matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
+                best = (sp.number, dp.number, matches)
                 break
         if best:
             break

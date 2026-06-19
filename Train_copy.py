@@ -336,9 +336,39 @@ def _extract_tag_suffixes(page):
     return {k: v for k, v in suffix_map.items() if v is not None}
 
 
+# 밸브/계측기 등 일반 Tag (예: "PI-0101", "GV-0202", "BFV-0003") — Train 번호와
+# 무관하게 Source/Target에서 보통 동일한 문자가 그대로 유지된다. 이런 Tag는
+# Train 번호 Tag보다 도면 전체에 훨씬 빽빽하게 분포하므로, 마크업 바로 옆의
+# 동일 Tag(예: PI-0101)를 기준점으로 쓰면 그 옆의 TG 등 실제로 달라지는
+# Tag 번호 자리를 더 정확하게 국소 보정할 수 있다.
+_GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
+
+
+def _extract_generic_tags(page):
+    """페이지에서 일반 계측/밸브 Tag 텍스트를 추출해 텍스트별 위치(중심점)를
+    반환. 같은 텍스트가 페이지에 여러 번 나오면 모호하므로 매칭에서 제외한다."""
+    text_map = {}
+    try:
+        words = page.get_text("words")
+    except Exception:
+        return {}
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        if not _GENERIC_TAG_RE.match(text):
+            continue
+        center = ((x0 + x1) / 2, (y0 + y1) / 2)
+        if text in text_map:
+            text_map[text] = None  # 중복 발견 → 모호함 표시
+        else:
+            text_map[text] = center
+    return {k: v for k, v in text_map.items() if v is not None}
+
+
 def _find_tag_matches(src_doc, dst_doc, log_fn=None):
-    """Source/Target 문서에서 Train 번호만 다른 동일 Tag(suffix)를 자동으로
-    찾아 매칭한다. 수동 입력 불필요.
+    """Source/Target 문서에서 (1) Train 번호만 다른 동일 Tag(suffix), (2) 텍스트가
+    완전히 동일한 일반 계측/밸브 Tag를 자동으로 찾아 매칭한다. 수동 입력 불필요.
+    (2)를 함께 쓰면 기준점 밀도가 크게 늘어나, 마크업 바로 옆의 Tag를 기준으로
+    국소 보정할 수 있다.
     반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...]) — 못 찾으면 None"""
     def log(msg):
         if log_fn:
@@ -346,16 +376,23 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
 
     for sp in src_doc:
         src_map = _extract_tag_suffixes(sp)
-        if not src_map:
+        src_generic = _extract_generic_tags(sp)
+        if not src_map and not src_generic:
             continue
         for dp in dst_doc:
             dst_map = _extract_tag_suffixes(dp)
+            dst_generic = _extract_generic_tags(dp)
             common = sorted(set(src_map) & set(dst_map))
-            if len(common) >= 2:
+            common_generic = sorted(set(src_generic) & set(dst_generic))
+            if len(common) + len(common_generic) >= 2:
                 pairs = [(src_map[s], dst_map[s]) for s in common]
+                pairs += [(src_generic[s], dst_generic[s]) for s in common_generic]
                 log(f"  [위치 보정] 자동 Tag 매칭 {len(pairs)}개 발견 "
-                    f"(Source p{sp.number + 1} → Target p{dp.number + 1})\n")
+                    f"(Train 번호 Tag {len(common)}개 + 일반 Tag {len(common_generic)}개, "
+                    f"Source p{sp.number + 1} → Target p{dp.number + 1})\n")
                 for s in common[:10]:
+                    log(f"    - {s}\n")
+                for s in common_generic[:10]:
                     log(f"    - {s}\n")
                 return sp.number, dp.number, pairs
     return None
