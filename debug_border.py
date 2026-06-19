@@ -33,6 +33,9 @@ def find_border_rect(page, log_prefix=""):
 
     print(f"{log_prefix}  드로잉 객체 수: {len(drawings)}")
 
+    MIN_FRAC = 0.3
+    MAX_FRAC = 0.995
+
     candidates = []
     re_count = 0
     for d in drawings:
@@ -41,21 +44,22 @@ def find_border_rect(page, log_prefix=""):
                 re_count += 1
                 rect = fitz.Rect(item[1])
                 area = abs(rect.width * rect.height)
-                if 0 < area <= page_area * 0.995:
+                if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
                     candidates.append(rect)
 
-    print(f"{log_prefix}  명시적 사각형('re') 개수: {re_count}, 후보(전체 페이지 제외): {len(candidates)}")
+    bbox_count = 0
+    for d in drawings:
+        r = d.get("rect")
+        if r is None:
+            continue
+        bbox_count += 1
+        rect = fitz.Rect(r)
+        area = abs(rect.width * rect.height)
+        if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
+            candidates.append(rect)
 
-    if not candidates:
-        for d in drawings:
-            r = d.get("rect")
-            if r is None:
-                continue
-            rect = fitz.Rect(r)
-            area = abs(rect.width * rect.height)
-            if 0 < area <= page_area * 0.995:
-                candidates.append(rect)
-        print(f"{log_prefix}  fallback bbox 후보: {len(candidates)}")
+    print(f"{log_prefix}  명시적 사각형('re') 개수: {re_count}, path bbox 개수: {bbox_count}, "
+          f"후보(면적 {MIN_FRAC*100:.0f}%~{MAX_FRAC*100:.0f}%): {len(candidates)}")
 
     if not candidates:
         return None

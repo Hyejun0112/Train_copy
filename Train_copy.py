@@ -309,7 +309,11 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 
 def _find_border_rect(page):
     """페이지에서 가장 큰 사각형(도면 테두리로 추정)을 벡터 드로잉에서 탐지.
-    못 찾으면 None."""
+    못 찾으면 None.
+    테두리가 명시적 're' 명령으로 그려진 경우와, 4개의 선(line)으로 그려진
+    경우(이 때는 path 전체의 bbox가 테두리 크기) 모두 후보로 모아서
+    가장 큰 사각형을 선택한다. 너무 작은 사각형(아이콘 등)과 페이지 전체
+    크기인 사각형(배경)은 제외한다."""
     page_rect = page.rect
     page_area = page_rect.width * page_rect.height
     if page_area <= 0:
@@ -320,26 +324,29 @@ def _find_border_rect(page):
     except Exception:
         return None
 
+    MIN_FRAC = 0.3    # 페이지 면적의 30% 이상이어야 "테두리"로 간주
+    MAX_FRAC = 0.995   # 페이지 전체 크기(배경)는 제외
+
     candidates = []
-    # 1순위: 명시적 사각형(re) 드로잉 명령
+
+    # 1) 명시적 사각형(re) 드로잉 명령
     for d in drawings:
         for item in d.get("items", []):
             if item[0] == "re":
                 rect = fitz.Rect(item[1])
                 area = abs(rect.width * rect.height)
-                if 0 < area <= page_area * 0.995:
+                if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
                     candidates.append(rect)
 
-    # 2순위: 사각형 명령이 없으면 드로잉 bbox 중 가장 큰 것(전체 페이지 제외)
-    if not candidates:
-        for d in drawings:
-            r = d.get("rect")
-            if r is None:
-                continue
-            rect = fitz.Rect(r)
-            area = abs(rect.width * rect.height)
-            if 0 < area <= page_area * 0.995:
-                candidates.append(rect)
+    # 2) 선(line) 4개로 그려진 사각 테두리 등 — path 전체의 bbox 사용
+    for d in drawings:
+        r = d.get("rect")
+        if r is None:
+            continue
+        rect = fitz.Rect(r)
+        area = abs(rect.width * rect.height)
+        if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
+            candidates.append(rect)
 
     if not candidates:
         return None
