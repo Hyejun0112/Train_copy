@@ -1,6 +1,7 @@
 import os
 import csv
 import math
+import re
 import shutil
 import tempfile
 import traceback
@@ -37,7 +38,7 @@ filter_color     = ""   # RGB hex, 예: "0000FF"
 filter_date_limit = ""  # "YYYY-MM-DD" (이 날짜까지 작성된 마크업만 포함)
 filter_author    = ""   # 작성자(사번)
 
-# 위치 보정 설정 (도면 레이아웃이 다른 경우) — 도면 테두리 자동 탐지로 기준점 계산
+# 위치 보정 설정 (도면 레이아웃이 다른 경우) — Train 번호만 다른 동일 Tag 자동 매칭으로 기준점 계산
 pos_correction_enabled = False
 
 
@@ -307,135 +308,101 @@ def build_filtered_copy(src_path, color_hex, date_limit, author, log_fn=None):
 #  위치 보정 (도면 레이아웃이 다른 경우) — PyMuPDF 직접 복사
 # ══════════════════════════════════════════════════════════
 
-def _find_border_rect(page):
-    """페이지에서 도면 테두리(가장 바깥쪽 큰 사각형)를 탐지.
-    못 찾으면 None.
+# Train 번호(앞쪽 2~4자리 숫자)만 다르고 나머지는 동일한 Tag 패턴
+# 예: "504-CWS-0100-400-ACB3B02SE51-NN" / "604-CWS-0100-400-ACB3B02SE51-NN"
+_TAG_RE = re.compile(r'^(\d{2,4})-([A-Za-z0-9][A-Za-z0-9-]{4,})$')
 
-    테두리는 보통 페이지 가로/세로를 거의 가득 채우는 긴 직선 4개(상/하/좌/우)
-    또는 명시적 사각형(re)으로 그려진다. 이 직선/사각형들의 변(edge)을 모두
-    모아서, 페이지 너비의 대부분을 가로지르는 가로선들과 페이지 높이의
-    대부분을 가로지르는 세로선들의 바깥쪽 끝(min/max)으로 테두리를 구성한다.
-    (path 전체의 bbox만 보면 테두리가 여러 개의 분리된 드로잉 객체로
-    나뉘어 있을 때 일부만 잡히므로, 변 단위로 모아서 바깥 경계를 계산한다.)"""
-    page_rect = page.rect
-    page_w, page_h = page_rect.width, page_rect.height
-    if page_w <= 0 or page_h <= 0:
-        return None
 
+def _extract_tag_suffixes(page):
+    """페이지에서 'NNN-나머지' 형태의 Tag 텍스트를 추출해 suffix(나머지 부분)별
+    위치(중심점)를 반환. 같은 suffix가 페이지에 여러 번 나오면 어느 게 맞는지
+    모호하므로 매칭에서 제외한다."""
+    suffix_map = {}
     try:
-        drawings = page.get_drawings()
+        words = page.get_text("words")
     except Exception:
-        return None
-
-    TOL = 1.0           # 가로/세로로 간주할 좌표 허용 오차(pt)
-    LEN_FRAC = 0.7       # 페이지 너비/높이의 70% 이상이어야 "테두리 변"으로 간주
-
-    def edges_of_item(item):
-        """item에서 (p1, p2) 직선 변들을 추출 (re는 4변으로 분해)"""
-        op = item[0]
-        if op == "l":
-            return [(item[1], item[2])]
-        if op == "re":
-            r = fitz.Rect(item[1])
-            tl, tr = fitz.Point(r.x0, r.y0), fitz.Point(r.x1, r.y0)
-            bl, br = fitz.Point(r.x0, r.y1), fitz.Point(r.x1, r.y1)
-            return [(tl, tr), (tr, br), (br, bl), (bl, tl)]
-        if op == "qu":
-            try:
-                pts = list(item[1])
-            except Exception:
-                return []
-            return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
-        return []
-
-    horiz_ys = []   # 긴 가로선의 y 좌표
-    vert_xs = []    # 긴 세로선의 x 좌표
-
-    for d in drawings:
-        for item in d.get("items", []):
-            for p1, p2 in edges_of_item(item):
-                dx = abs(p2.x - p1.x)
-                dy = abs(p2.y - p1.y)
-                if dy <= TOL and dx >= page_w * LEN_FRAC:
-                    horiz_ys.append((p1.y + p2.y) / 2)
-                elif dx <= TOL and dy >= page_h * LEN_FRAC:
-                    vert_xs.append((p1.x + p2.x) / 2)
-
-    if horiz_ys and vert_xs:
-        rect = fitz.Rect(min(vert_xs), min(horiz_ys), max(vert_xs), max(horiz_ys))
-        if rect.width > page_w * 0.3 and rect.height > page_h * 0.3:
-            return rect
-
-    # ── fallback: 긴 직선 기반 탐지가 안 되면 사각형/bbox 후보 중 가장 큰 것 ──
-    page_area = page_w * page_h
-    MIN_FRAC, MAX_FRAC = 0.3, 0.995
-    candidates = []
-    for d in drawings:
-        for item in d.get("items", []):
-            if item[0] == "re":
-                rect = fitz.Rect(item[1])
-                area = abs(rect.width * rect.height)
-                if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
-                    candidates.append(rect)
-    for d in drawings:
-        r = d.get("rect")
-        if r is None:
+        return {}
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        m = _TAG_RE.match(text)
+        if not m:
             continue
-        rect = fitz.Rect(r)
-        area = abs(rect.width * rect.height)
-        if page_area * MIN_FRAC <= area <= page_area * MAX_FRAC:
-            candidates.append(rect)
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda r: r.width * r.height, reverse=True)
-    return candidates[0]
+        suffix = m.group(2)
+        center = ((x0 + x1) / 2, (y0 + y1) / 2)
+        if suffix in suffix_map:
+            suffix_map[suffix] = None  # 중복 발견 → 모호함 표시
+        else:
+            suffix_map[suffix] = center
+    return {k: v for k, v in suffix_map.items() if v is not None}
 
 
-def _find_border_anchor_points(doc):
-    """문서에서 도면 테두리(가장 큰 사각형)를 찾아 두 꼭짓점을 기준점으로 반환.
-    반환: (page_index, top_left(x,y), bottom_right(x,y)) — 못 찾으면 None"""
-    for page in doc:
-        rect = _find_border_rect(page)
-        if rect:
-            return page.number, (rect.x0, rect.y0), (rect.x1, rect.y1)
+def _find_tag_matches(src_doc, dst_doc, log_fn=None):
+    """Source/Target 문서에서 Train 번호만 다른 동일 Tag(suffix)를 자동으로
+    찾아 매칭한다. 수동 입력 불필요.
+    반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...]) — 못 찾으면 None"""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    for sp in src_doc:
+        src_map = _extract_tag_suffixes(sp)
+        if not src_map:
+            continue
+        for dp in dst_doc:
+            dst_map = _extract_tag_suffixes(dp)
+            common = sorted(set(src_map) & set(dst_map))
+            if len(common) >= 2:
+                pairs = [(src_map[s], dst_map[s]) for s in common]
+                log(f"  [위치 보정] 자동 Tag 매칭 {len(pairs)}개 발견 "
+                    f"(Source p{sp.number + 1} → Target p{dp.number + 1})\n")
+                for s in common[:10]:
+                    log(f"    - {s}\n")
+                return sp.number, dp.number, pairs
     return None
 
 
-def _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2):
-    """기준점 2개로 이동+회전+스케일을 포함한 2D 유사변환 행렬(fitz.Matrix) 계산.
-    src 좌표 → dst 좌표로 매핑."""
-    s1 = complex(*src_p1)
-    s2 = complex(*src_p2)
-    d1 = complex(*dst_p1)
-    d2 = complex(*dst_p2)
+def _fit_similarity_matrix(pairs):
+    """여러 개의 (src_pt, dst_pt) 매칭 쌍으로 이동+회전+스케일을 포함한
+    2D 유사변환 행렬(fitz.Matrix)을 최소제곱으로 계산한다.
+    매칭 쌍이 4개 이상이면 잔차가 큰 이상치를 1회 걸러내고 재계산한다."""
+    if len(pairs) < 2:
+        raise ValueError("매칭된 Tag가 2개 미만이라 위치 보정을 계산할 수 없습니다.")
 
-    src_dist = abs(s2 - s1)
-    dst_dist = abs(d2 - d1)
-    if src_dist < 5 or dst_dist < 5:
-        raise ValueError(
-            "기준 태그 두 개의 위치가 너무 가깝습니다(거리 < 5pt). "
-            "서로 멀리 떨어진 고유한 텍스트 2개를 사용하세요."
-        )
+    def fit(pts):
+        s = [complex(*p[0]) for p in pts]
+        d = [complex(*p[1]) for p in pts]
+        n = len(s)
+        s_mean = sum(s) / n
+        d_mean = sum(d) / n
+        den = sum(abs(si - s_mean) ** 2 for si in s)
+        if den < 25:  # 기준점들이 거의 한 점에 몰려 있음 (분산 < 5pt^2 수준)
+            raise ValueError("매칭된 Tag들의 위치가 서로 너무 가깝습니다.")
+        num = sum((si - s_mean).conjugate() * (di - d_mean) for si, di in zip(s, d))
+        k = num / den
+        t = d_mean - k * s_mean
+        return k, t
 
-    scale = dst_dist / src_dist
+    k, t = fit(pairs)
+
+    if len(pairs) >= 4:
+        residuals = [abs(k * complex(*sp) + t - complex(*dp)) for sp, dp in pairs]
+        med = sorted(residuals)[len(residuals) // 2]
+        threshold = max(med * 4, 10)
+        filtered = [p for p, r in zip(pairs, residuals) if r <= threshold]
+        if 2 <= len(filtered) < len(pairs):
+            k, t = fit(filtered)
+
+    a, b = k.real, k.imag
+    e, f = t.real, t.imag
+    if not all(math.isfinite(v) for v in (a, b, e, f)):
+        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
+
+    scale = abs(k)
     if scale < 0.1 or scale > 10:
         raise ValueError(
             f"계산된 스케일({scale:.2f}배)이 비정상적입니다. "
-            "기준 태그가 잘못 매칭되었을 가능성이 높습니다. "
-            "더 고유하고 정확한 텍스트를 기준 태그로 사용하세요."
+            "Tag 매칭이 잘못되었을 가능성이 높습니다."
         )
-
-    k = (d2 - d1) / (s2 - s1)   # 스케일 * 회전을 복소수로 표현
-    a, b = k.real, k.imag
-    if not (math.isfinite(a) and math.isfinite(b)):
-        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
-    # dst_x = a*src_x - b*src_y + e
-    # dst_y = b*src_x + a*src_y + f
-    e = d1.real - (a * s1.real - b * s1.imag)
-    f = d1.imag - (b * s1.real + a * s1.imag)
-    if not all(math.isfinite(v) for v in (e, f)):
-        raise ValueError("변환 행렬 계산에 실패했습니다(비정상 좌표).")
     return fitz.Matrix(a, b, -b, a, e, f)
 
 
@@ -580,7 +547,8 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
 def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=None):
     """도면 레이아웃이 다른 경우: Bluebeam 자동화 없이 PyMuPDF로 직접
     마크업 좌표를 보정해서 Target(→Output)에 복사한다.
-    기준점은 도면 테두리(가장 큰 사각형)의 두 꼭짓점을 자동 탐지해서 사용 — 수동 입력 불필요.
+    기준점은 Train 번호만 다르고 나머지는 동일한 Tag(배관선번호 등)를
+    Source/Target에서 자동으로 찾아 매칭해서 사용 — 수동 입력 불필요.
     반환: (copied, skipped) 마크업 개수"""
     def log(msg):
         if log_fn:
@@ -592,22 +560,19 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     src_doc = fitz.open(src_path)
     dst_doc = fitz.open(dst_path)
 
-    src_border = _find_border_anchor_points(src_doc)
-    dst_border = _find_border_anchor_points(dst_doc)
-
-    if not (src_border and dst_border):
+    match_result = _find_tag_matches(src_doc, dst_doc, log_fn=log)
+    if not match_result:
         src_doc.close()
         dst_doc.close()
-        missing = []
-        if not src_border: missing.append("Source에서 도면 테두리를 찾지 못함")
-        if not dst_border: missing.append("Target에서 도면 테두리를 찾지 못함")
-        raise RuntimeError("위치 보정 실패: " + ", ".join(missing))
+        raise RuntimeError(
+            "위치 보정 실패: Source/Target에서 Train 번호만 다른 동일 Tag를 "
+            "2개 이상 찾지 못했습니다."
+        )
 
-    src_page_idx, src_p1, src_p2 = src_border
-    dst_page_idx, dst_p1, dst_p2 = dst_border
-
-    matrix = _compute_similarity_matrix(src_p1, src_p2, dst_p1, dst_p2)
-    log(f"  [위치 보정] 테두리 기준 변환 행렬 계산 완료 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
+    src_page_idx, dst_page_idx, pairs = match_result
+    matrix = _fit_similarity_matrix(pairs)
+    log(f"  [위치 보정] Tag {len(pairs)}개 기준 변환 행렬 계산 완료 "
+        f"(Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
@@ -670,7 +635,7 @@ def run_position_correction_isolated(src_path, dst_path, out_path,
         exitcode = proc.exitcode
         raise RuntimeError(
             f"위치 보정 작업이 비정상 종료되었습니다 (exit code {exitcode}). "
-            "PyMuPDF 내부 오류로 추정됩니다. 해당 도면에 테두리가 명확한지 확인하세요."
+            "PyMuPDF 내부 오류로 추정됩니다. Source/Target에 매칭 가능한 Tag가 있는지 확인하세요."
         )
 
     status = result[0]
@@ -1003,10 +968,10 @@ class App(tk.Tk):
 
         tk.Label(
             frm,
-            text="※ 도면 테두리(가장 큰 사각형)를 자동으로 찾아\n"
-                 "   기준점으로 사용합니다. 별도 입력 불필요.\n"
-                 "   (이동 + 회전 + 스케일까지 보정, Bluebeam 자동화 없이 직접 적용)\n"
-                 "   ※ Source/Target 모두 동일한 표제란/테두리 양식 필요",
+            text="※ Train 번호만 다르고 나머지는 동일한 Tag(배관선번호 등)를\n"
+                 "   Source/Target에서 자동으로 찾아 기준점으로 사용합니다.\n"
+                 "   별도 입력 불필요. (이동 + 회전 + 스케일까지 보정,\n"
+                 "   Bluebeam 자동화 없이 직접 적용)",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))
