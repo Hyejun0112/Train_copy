@@ -336,17 +336,23 @@ def _extract_tag_suffixes(page):
     return {k: v for k, v in suffix_map.items() if v is not None}
 
 
-# 밸브/계측기 등 일반 Tag (예: "PI-0101", "GV-0202", "BFV-0003") — Train 번호와
-# 무관하게 Source/Target에서 보통 동일한 문자가 그대로 유지된다. 이런 Tag는
-# Train 번호 Tag보다 도면 전체에 훨씬 빽빽하게 분포하므로, 마크업 바로 옆의
-# 동일 Tag(예: PI-0101)를 기준점으로 쓰면 그 옆의 TG 등 실제로 달라지는
-# Tag 번호 자리를 더 정확하게 국소 보정할 수 있다.
+# 계측기 등 일반 Tag (예: "PI-0101") — Train 번호와 무관하게 Source/Target에서
+# 보통 동일한 문자가 그대로 유지된다. 이런 Tag는 Train 번호 Tag보다 도면 전체에
+# 훨씬 빽빽하게 분포하므로, 마크업 바로 옆의 동일 Tag를 기준점으로 쓰면 국소
+# 보정 정확도가 올라간다.
+# 단, 밸브 Tag(GV, BFV, CV, BV, PV, RV, SV, TV, FV, NV, XV, AOV, MOV, SOV, PSV 등)는
+# Train Copy마다 번호가 별도로 매겨지므로 같은 번호라도 다른 설비를 가리킬 수
+# 있다 — 기준점에서 반드시 제외해야 한다.
 _GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
+_VALVE_PREFIX_RE = re.compile(
+    r'^(?:AOV|MOV|SOV|PSV|BFV|GV|CV|BV|PV|RV|SV|TV|FV|NV|XV|V)-', re.IGNORECASE
+)
 
 
 def _extract_generic_tags(page):
-    """페이지에서 일반 계측/밸브 Tag 텍스트를 추출해 텍스트별 위치(중심점)를
-    반환. 같은 텍스트가 페이지에 여러 번 나오면 모호하므로 매칭에서 제외한다."""
+    """페이지에서 일반 계측 Tag 텍스트를 추출해 텍스트별 위치(중심점)를
+    반환. 밸브 Tag는 Train Copy마다 번호가 달라질 수 있어 제외하고,
+    같은 텍스트가 페이지에 여러 번 나오면 모호하므로 매칭에서 제외한다."""
     text_map = {}
     try:
         words = page.get_text("words")
@@ -355,6 +361,8 @@ def _extract_generic_tags(page):
     for w in words:
         x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
         if not _GENERIC_TAG_RE.match(text):
+            continue
+        if _VALVE_PREFIX_RE.match(text):
             continue
         center = ((x0 + x1) / 2, (y0 + y1) / 2)
         if text in text_map:

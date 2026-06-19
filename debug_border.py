@@ -56,10 +56,13 @@ def extract_tag_suffixes(page, log_prefix=""):
     return result
 
 
-# 밸브/계측기/OPC 등 일반 Tag (예: "PI-0101", "GV-0202", "BFV-0003", "B-101") —
-# Train 번호와 무관하게 Source/Target에서 동일한 문자가 그대로 유지되며, Line이나
-# 밸브 바로 옆에 위치하므로 기준점 밀도를 늘리는 데 쓴다.
+# 계측기 등 일반 Tag (예: "PI-0101") — Train 번호와 무관하게 Source/Target에서
+# 동일한 문자가 그대로 유지되므로 기준점 밀도를 늘리는 데 쓴다.
+# 단, 밸브 Tag는 Train Copy마다 번호가 별도로 매겨지므로 제외한다.
 GENERIC_TAG_RE = re.compile(r'^[A-Za-z]{1,6}-\d{2,6}[A-Za-z0-9]*$')
+VALVE_PREFIX_RE = re.compile(
+    r'^(?:AOV|MOV|SOV|PSV|BFV|GV|CV|BV|PV|RV|SV|TV|FV|NV|XV|V)-', re.IGNORECASE
+)
 
 
 def extract_generic_tags(page, log_prefix=""):
@@ -74,6 +77,8 @@ def extract_generic_tags(page, log_prefix=""):
     for w in words:
         x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
         if not GENERIC_TAG_RE.match(text):
+            continue
+        if VALVE_PREFIX_RE.match(text):
             continue
         center = ((x0 + x1) / 2, (y0 + y1) / 2)
         if text in text_map:
