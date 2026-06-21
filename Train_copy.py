@@ -413,15 +413,60 @@ def _border_corner_anchors(src_page, dst_page):
     return list(zip(s_corners, d_corners))
 
 
+# 사용자가 Bluebeam에서 직접 찍어두는 "수동 기준점" 마크업 색상. 이 색(마젠타)으로
+# 그려진 마크업을 Source/Target에서 각각 찾아, 같은 순서로 1:1 매칭해 가장 신뢰도
+# 높은 기준점으로 사용한다. 자동 Tag/Symbol 매칭이 오매칭될 위험이 있는 도면에서,
+# 사람이 눈으로 확인한 동일 위치를 보장하기 위함. 이 마크업 자체는 복사 대상에서 제외.
+_MANUAL_ANCHOR_COLOR = (1.0, 0.0, 1.0)
+_MANUAL_ANCHOR_TOL = 0.08
+
+
+def _is_anchor_color(annot) -> bool:
+    colors = annot.colors or {}
+    for c in (colors.get("stroke"), colors.get("fill")):
+        if c and len(c) == 3 and all(
+            abs(c[i] - _MANUAL_ANCHOR_COLOR[i]) < _MANUAL_ANCHOR_TOL for i in range(3)
+        ):
+            return True
+    return False
+
+
+def _extract_manual_anchor_points(page):
+    """페이지에서 마젠타색 기준점 마크업을 찾아 (위치 순서대로 정렬된 중심점 목록,
+    해당 마크업들의 xref 집합)을 반환한다. xref는 복사 시 제외하기 위함."""
+    found = []
+    for annot in page.annots() or []:
+        if not _is_anchor_color(annot):
+            continue
+        r = annot.rect
+        found.append((annot.xref, ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)))
+    return found
+
+
 def _find_tag_matches(src_doc, dst_doc, log_fn=None):
-    """Source/Target 문서에서 (1) Train 번호만 다른 동일 Tag(배관선번호 suffix),
-    (2) 텍스트가 완전히 동일한 일반 계측/제어밸브/Logic/OPC Tag, (3) 모양이
-    동일한 Symbol(벡터 도형)을 자동으로 찾아 매칭하고, (4) 페이지 모서리를
-    보조 기준점으로 추가한다. 수동 입력 불필요.
-    반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...]) — 못 찾으면 None"""
+    """Source/Target 문서에서 기준점을 찾아 매칭한다. 우선순위:
+    (0) 사용자가 마젠타색으로 직접 찍어둔 수동 기준점 마크업(있으면 이것만 사용 —
+        가장 신뢰도 높음), 없으면 자동으로 (1) Train 번호만 다른 동일 Tag(배관선번호
+        suffix), (2) 텍스트가 완전히 동일한 일반 계측/제어밸브/Logic/OPC Tag,
+        (3) 모양이 동일한 Symbol(벡터 도형)을 찾아 매칭하고, (4) 페이지 모서리를
+        보조 기준점으로 추가한다.
+    반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...], skip_src_xrefs) — 못 찾으면 None"""
     def log(msg):
         if log_fn:
             log_fn(msg)
+
+    for sp in src_doc:
+        src_anchors = _extract_manual_anchor_points(sp)
+        for dp in dst_doc:
+            dst_anchors = _extract_manual_anchor_points(dp)
+            if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
+                src_sorted = sorted(src_anchors, key=lambda t: t[0])
+                dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
+                pairs = [(s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)]
+                skip_xrefs = {xref for xref, _ in src_sorted}
+                log(f"  [위치 보정] 수동 기준점(마젠타 마크업) {len(pairs)}개 발견 — "
+                    f"이 기준점만 사용 (Source p{sp.number + 1} → Target p{dp.number + 1})\n")
+                return sp.number, dp.number, pairs, skip_xrefs
 
     for sp in src_doc:
         src_map = _extract_tag_suffixes(sp)
@@ -450,7 +495,7 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
                     log(f"    - {s}\n")
                 for s in common_generic[:10]:
                     log(f"    - {s}\n")
-                return sp.number, dp.number, pairs
+                return sp.number, dp.number, pairs, set()
     return None
 
 
@@ -613,8 +658,8 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
 def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=None):
     """도면 레이아웃이 다른 경우: Bluebeam 자동화 없이 PyMuPDF로 직접
     마크업 좌표를 보정해서 Target(→Output)에 복사한다.
-    기준점은 Train 번호만 다르고 나머지는 동일한 Tag(배관선번호 등)를
-    Source/Target에서 자동으로 찾아 매칭해서 사용 — 수동 입력 불필요.
+    Source/Target에 마젠타색 기준점 마크업을 직접 찍어두면 그것을 우선 사용하고,
+    없으면 배관선번호/계측기 Tag/Symbol/도면 모서리를 자동으로 찾아 매칭한다.
     반환: (copied, skipped) 마크업 개수"""
     def log(msg):
         if log_fn:
@@ -635,8 +680,8 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
             "2개 이상 찾지 못했습니다."
         )
 
-    src_page_idx, dst_page_idx, pairs = match_result
-    log(f"  [위치 보정] Tag {len(pairs)}개 매칭 완료 — 마크업마다 가까운 Tag 기준 "
+    src_page_idx, dst_page_idx, pairs, skip_xrefs = match_result
+    log(f"  [위치 보정] 기준점 {len(pairs)}개 매칭 완료 — 마크업마다 가까운 기준점 기준 "
         f"국소 이동 보정 적용 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
@@ -644,6 +689,8 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
 
     copied, skipped = 0, 0
     for annot in src_page.annots() or []:
+        if annot.xref in skip_xrefs:
+            continue  # 수동 기준점 마크업 자체는 복사하지 않음
         rect = annot.rect
         anchor = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
         matrix = _local_offset_matrix(anchor, pairs)
@@ -1036,10 +1083,11 @@ class App(tk.Tk):
 
         tk.Label(
             frm,
-            text="※ 배관선번호/계측기/제어밸브/Symbol/도면 모서리를 자동으로 찾아\n"
-                 "   기준점으로 사용합니다. 별도 입력 불필요. 마크업마다 가까운\n"
-                 "   기준점 기준으로 국소 위치 보정 적용 (수동 밸브 번호는 Train별로\n"
-                 "   달라져 기준점에서 제외, Bluebeam 자동화 없이 직접 적용)",
+            text="※ Source/Target에 마젠타색(255,0,255) 작은 마크업을 같은 순서로\n"
+                 "   직접 찍어두면 그 위치를 기준점으로 우선 사용합니다(가장 정확).\n"
+                 "   없으면 배관선번호/계측기/제어밸브/Symbol/도면 모서리를 자동으로\n"
+                 "   찾아 기준점으로 사용 (수동 밸브 번호는 Train별로 달라져 제외).\n"
+                 "   마크업마다 가까운 기준점 기준 국소 보정, Bluebeam 자동화 없이 직접 적용",
             font=("Segoe UI", 8), fg="#6c7086", bg="#1e1e2e",
             justify="left", anchor="w"
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))

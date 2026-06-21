@@ -20,6 +20,32 @@ except ImportError:
     sys.exit(1)
 
 
+# 사용자가 Bluebeam에서 직접 찍어두는 마젠타색 수동 기준점 마크업
+MANUAL_ANCHOR_COLOR = (1.0, 0.0, 1.0)
+MANUAL_ANCHOR_TOL = 0.08
+
+
+def is_anchor_color(annot):
+    colors = annot.colors or {}
+    for c in (colors.get("stroke"), colors.get("fill")):
+        if c and len(c) == 3 and all(
+            abs(c[i] - MANUAL_ANCHOR_COLOR[i]) < MANUAL_ANCHOR_TOL for i in range(3)
+        ):
+            return True
+    return False
+
+
+def extract_manual_anchor_points(page, log_prefix=""):
+    found = []
+    for annot in page.annots() or []:
+        if not is_anchor_color(annot):
+            continue
+        r = annot.rect
+        found.append((annot.xref, ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)))
+    print(f"{log_prefix}  마젠타 수동 기준점 마크업: {len(found)}개 발견")
+    return found
+
+
 # Train 번호(앞쪽 2~4자리 숫자)만 다르고 나머지는 동일한 Tag 패턴
 # 예: "504-CWS-0100-400-ACB3B02SE51-NN" / "604-CWS-0100-400-ACB3B02SE51-NN"
 TAG_RE = re.compile(r'^(\d{2,4})-([A-Za-z0-9][A-Za-z0-9-]{4,})$')
@@ -146,31 +172,46 @@ def main():
 
     best = None
     for sp in src_doc:
-        print(f"\n[SOURCE] 페이지 {sp.number} 크기: {sp.rect}")
-        src_map = extract_tag_suffixes(sp, log_prefix="[SOURCE]")
-        src_generic = extract_generic_tags(sp, log_prefix="[SOURCE]")
-        src_symbols = extract_symbol_signatures(sp, log_prefix="[SOURCE]")
-        if not src_map and not src_generic and not src_symbols:
-            continue
+        src_anchors = extract_manual_anchor_points(sp, log_prefix="[SOURCE]")
         for dp in dst_doc:
-            print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
-            dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
-            dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
-            dst_symbols = extract_symbol_signatures(dp, log_prefix="[TARGET]")
-            common = sorted(set(src_map) & set(dst_map))
-            common_generic = sorted(set(src_generic) & set(dst_generic))
-            common_symbols = sorted(set(src_symbols) & set(dst_symbols), key=str)
-            total = len(common) + len(common_generic) + len(common_symbols)
-            print(f"  >>> 공통 매칭: 배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
-                  f"Symbol {len(common_symbols)}개 = {total}개")
-            if total >= 2:
-                matches = [(s, src_map[s], dst_map[s]) for s in common]
-                matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
-                matches += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
-                best = (sp.number, dp.number, matches)
+            dst_anchors = extract_manual_anchor_points(dp, log_prefix="[TARGET]")
+            if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
+                src_sorted = sorted(src_anchors, key=lambda t: t[0])
+                dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
+                print(f"  >>> 수동 기준점 {len(src_sorted)}개 매칭 (이것만 사용)")
+                best = (sp.number, dp.number,
+                        [("수동기준점", s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)])
                 break
         if best:
             break
+
+    if not best:
+        for sp in src_doc:
+            print(f"\n[SOURCE] 페이지 {sp.number} 크기: {sp.rect}")
+            src_map = extract_tag_suffixes(sp, log_prefix="[SOURCE]")
+            src_generic = extract_generic_tags(sp, log_prefix="[SOURCE]")
+            src_symbols = extract_symbol_signatures(sp, log_prefix="[SOURCE]")
+            if not src_map and not src_generic and not src_symbols:
+                continue
+            for dp in dst_doc:
+                print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
+                dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
+                dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
+                dst_symbols = extract_symbol_signatures(dp, log_prefix="[TARGET]")
+                common = sorted(set(src_map) & set(dst_map))
+                common_generic = sorted(set(src_generic) & set(dst_generic))
+                common_symbols = sorted(set(src_symbols) & set(dst_symbols), key=str)
+                total = len(common) + len(common_generic) + len(common_symbols)
+                print(f"  >>> 공통 매칭: 배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
+                      f"Symbol {len(common_symbols)}개 = {total}개")
+                if total >= 2:
+                    matches = [(s, src_map[s], dst_map[s]) for s in common]
+                    matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
+                    matches += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
+                    best = (sp.number, dp.number, matches)
+                    break
+            if best:
+                break
 
     if not best:
         print("\n!! 매칭된 Tag가 2개 미만이라 변환 행렬을 계산할 수 없습니다.")
