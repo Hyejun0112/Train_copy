@@ -564,6 +564,31 @@ def _local_offset_matrix(pt, pairs, k=3):
     return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
 
 
+def _global_similarity_matrix(pairs):
+    """모든 기준점 쌍으로 도면 한 장 전체에 적용할 단일 유사변환(회전+스케일+
+    이동)을 최소제곱 적합한다. 마크업마다 다른 국소 변환을 쓰면 클라우드+콜아웃
+    +지시선처럼 여러 조각으로 이루어진 마크업이 서로 어긋나(따로 놀고) 보이므로,
+    한 장 전체에 동일한 변환을 적용해 마크업 간 상대 위치를 그대로 보존한다.
+    유사변환은 평행/직각/비율을 보존하므로 기울어짐(전단)도 생기지 않는다."""
+    n = len(pairs)
+    if n == 0:
+        return fitz.Matrix(1, 0, 0, 1, 0, 0)
+    zs = [complex(*sp) for sp, _ in pairs]
+    ws = [complex(*dp) for _, dp in pairs]
+    zbar = sum(zs) / n
+    wbar = sum(ws) / n
+    den = sum(abs(z - zbar) ** 2 for z in zs)
+    if den < 1e-9 or n < 2:
+        return fitz.Matrix(1, 0, 0, 1, wbar.real - zbar.real, wbar.imag - zbar.imag)
+    num = sum((z - zbar).conjugate() * (v - wbar) for z, v in zip(zs, ws))
+    a = num / den
+    scale = abs(a)
+    if not math.isfinite(scale) or scale < 0.5 or scale > 2.0:
+        return fitz.Matrix(1, 0, 0, 1, wbar.real - zbar.real, wbar.imag - zbar.imag)
+    b = wbar - a * zbar
+    return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
+
+
 def _is_finite_point(pt) -> bool:
     return math.isfinite(pt[0]) and math.isfinite(pt[1]) and \
         abs(pt[0]) < 1_000_000 and abs(pt[1]) < 1_000_000
@@ -1062,8 +1087,16 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         )
 
     src_page_idx, dst_page_idx, pairs, skip_xrefs = match_result
-    log(f"  [위치 보정] 기준점 {len(pairs)}개 매칭 완료 — 마크업마다 가까운 기준점 기준 "
-        f"국소 이동 보정 적용 (Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
+
+    # 도면 한 장 전체에 동일한 단일 유사변환을 적용한다. 마크업마다 국소 변환을
+    # 쓰면 클라우드+콜아웃처럼 여러 조각으로 된 마크업이 서로 어긋나므로, 전역
+    # 변환으로 마크업 간 상대 위치를 그대로 보존한다.
+    matrix = _global_similarity_matrix(pairs)
+    rot_deg = math.degrees(math.atan2(matrix.b, matrix.a))
+    scale = math.hypot(matrix.a, matrix.b)
+    log(f"  [위치 보정] 기준점 {len(pairs)}개로 전역 변환 적용 "
+        f"(회전 {rot_deg:.2f}°, 배율 {scale:.4f}, "
+        f"Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
@@ -1072,9 +1105,6 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     for annot in src_page.annots() or []:
         if annot.xref in skip_xrefs:
             continue  # 수동 기준점 마크업 자체는 복사하지 않음
-        rect = annot.rect
-        anchor = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
-        matrix = _local_offset_matrix(anchor, pairs)
         ok = _clone_annot_with_appearance(annot, dst_page, matrix)
         if not ok:
             ok = _copy_annot_with_transform(annot, dst_page, matrix)
