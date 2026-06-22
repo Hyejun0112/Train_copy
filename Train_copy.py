@@ -859,36 +859,49 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     content = (src_annot.info or {}).get("content", "") or ""
 
     try:
-        # 외형(AP) Form XObject를 /Resources(글꼴 등)까지 통째로 깊은 복사한 뒤,
-        # 위치/회전/스케일만 새 /Matrix로 덮어쓴다. 스트림 바이트만 복사하면
-        # 글꼴 자원이 빠져 글자가 Helvetica 기본값으로 깨진다.
-        xref_map = {}
-        new_ap_xref = _graft_pdf_object(src_doc, dst_doc, ap_xref, xref_map)
+        # 핵심: 주석을 /Type·/Subtype·/Rect·/AP 등 일부 키만 골라 새로 조립하면
+        # Bluebeam이 마크업 인식에 쓰는 고유 키(/NM, /Subj, /BE 구름효과, /IT
+        # intent, 그룹/Popup 참조, Bluebeam 전용 데이터 등)가 전부 빠져, 외형은
+        # 멀쩡히 저장돼도(=PNG·Adobe엔 보임) Bluebeam 화면엔 안 보이게 된다.
+        # → 원본 주석 객체를 통째로 깊은 복사(graft)한 뒤, 좌표 관련 키만 덮어쓴다.
+        #
+        # /P(부모 페이지)가 소스 페이지를 통째로 복사하지 않도록, xref_map에
+        # 소스 페이지 → 대상 페이지 매핑을 미리 심어둔다.
+        src_page = src_annot.parent
+        xref_map = {src_page.xref: dst_page.xref}
+        new_annot_xref = _graft_pdf_object(src_doc, dst_doc, src_annot.xref, xref_map)
+
+        # graft가 외형(AP) Form XObject도 /Resources(글꼴 등)까지 같이 복사했다.
+        # 그 새 AP의 /Matrix만 위치/회전/스케일이 반영된 값으로 덮어쓴다.
+        new_ap_xref = xref_map.get(ap_xref)
+        if new_ap_xref:
+            dst_doc.xref_set_key(
+                new_ap_xref, "Matrix",
+                f"[{combined.a:.6f} {combined.b:.6f} {combined.c:.6f} "
+                f"{combined.d:.6f} {combined.e:.4f} {combined.f:.4f}]"
+            )
+
+        # 위치(Rect)·부모 페이지(P)를 대상 좌표/페이지로 교체.
         dst_doc.xref_set_key(
-            new_ap_xref, "Matrix",
-            f"[{combined.a:.6f} {combined.b:.6f} {combined.c:.6f} "
-            f"{combined.d:.6f} {combined.e:.4f} {combined.f:.4f}]"
+            new_annot_xref, "Rect",
+            f"[{new_rect.x0:.4f} {new_rect.y0:.4f} {new_rect.x1:.4f} {new_rect.y1:.4f}]"
         )
+        dst_doc.xref_set_key(new_annot_xref, "P", f"{dst_page.xref} 0 R")
 
-        contents_kv = ""
-        if content:
-            contents_kv = f" /Contents {_pdf_text_string(content)}"
-
-        new_annot_xref = dst_doc.get_new_xref()
-        dst_doc.update_object(
-            new_annot_xref,
-            "<< /Type /Annot /Subtype /" + subtype +
-            f" /Rect [{new_rect.x0:.4f} {new_rect.y0:.4f} {new_rect.x1:.4f} {new_rect.y1:.4f}] "
-            f"/AP << /N {new_ap_xref} 0 R >> /CA {opacity}{contents_kv} /F 4 "
-            f"/P {dst_page.xref} 0 R >>"
-        )
+        # 표시 플래그(/F): Print(4) 켜고, Hidden(2)·NoView(32) 끔 — 화면에 보이게.
+        try:
+            _, fval = src_doc.xref_get_key(src_annot.xref, "F")
+            f_int = int(re.search(r'-?\d+', fval).group()) if fval else 0
+        except Exception:
+            f_int = 0
+        f_int = (f_int | 4) & ~2 & ~32
+        dst_doc.xref_set_key(new_annot_xref, "F", str(f_int))
 
         # Adobe류 뷰어는 /AP만 있으면 그대로 그려주지만, Bluebeam은 자체 마크업
         # 엔진이 타입별 필수 기하 키(Line=/L, Polygon·PolyLine=/Vertices,
-        # Ink=/InkList, Highlight 등=/QuadPoints, FreeText 말풍선선=/CL)가
-        # 없으면 마크업 자체를 인식·렌더링하지 않는 것으로 보인다(외형은 저장
-        # 되어도 화면에 전혀 안 보이는 현상의 실제 원인). 원본 키를 새 좌표계
-        # (matrix_pdf)로 변환해 그대로 옮겨준다.
+        # Ink=/InkList, Highlight 등=/QuadPoints, FreeText 말풍선선=/CL)를 직접
+        # 읽는다. graft로 가져온 원본 키는 '소스 좌표'라 대상 좌표계
+        # (matrix_pdf)로 변환해 덮어써야 위치가 맞는다.
         def _xform_flat_pairs(raw_str):
             nums = _parse_pdf_floats(raw_str)
             out = []
@@ -936,28 +949,6 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
                     )
                 except Exception:
                     pass
-
-        # 원본 마크업의 스타일/속성 키(특히 /DA·/DS = Bluebeam이 읽는 글꼴 정보)를
-        # 그대로 복사한다. 간접참조면 그 객체도 깊은 복사해 dst로 가져온다.
-        for key in _ANNOT_STYLE_KEYS:
-            try:
-                kkind, kval = src_doc.xref_get_key(src_annot.xref, key)
-            except Exception:
-                continue
-            if kkind == "null" or not kval:
-                continue
-            if kkind == "xref":
-                m_ref = re.match(r'(\d+)\s+0\s+R', kval.strip())
-                if not m_ref:
-                    continue
-                grafted = _graft_pdf_object(
-                    src_doc, dst_doc, int(m_ref.group(1)), xref_map
-                )
-                kval = f"{grafted} 0 R"
-            try:
-                dst_doc.xref_set_key(new_annot_xref, key, kval)
-            except Exception:
-                continue
 
         page_xref = dst_page.xref
         kind, annots_val = dst_doc.xref_get_key(page_xref, "Annots")
