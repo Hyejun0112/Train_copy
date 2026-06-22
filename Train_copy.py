@@ -7,7 +7,6 @@ import tempfile
 import traceback
 import time
 import threading
-import difflib
 import itertools
 import multiprocessing as mp
 import tkinter as tk
@@ -415,52 +414,6 @@ def _border_corner_anchors(src_page, dst_page):
     return list(zip(s_corners, d_corners))
 
 
-# 보더(Title block)는 보통 우측 하단에 있고, 도면번호 등 도면을 식별하는 문구가
-# 적혀 있다. 위치 보정의 기준점으로는 쓸 수 없지만(보더 위치 자체는 Source/
-# Target에서 항상 동일하므로 이동량 정보가 없음), 여러 페이지짜리 PDF에서
-# "이 Source 페이지가 어느 Target 페이지와 같은 도면인지" 자동으로 골라주는
-# 용도로는 유용하다.
-_BORDER_REGION_FRAC = (0.6, 0.8, 1.0, 1.0)  # (x0, y0, x1, y1) 비율, 우측 하단
-
-
-def _extract_border_text(page):
-    rect = page.rect
-    fx0, fy0, fx1, fy1 = _BORDER_REGION_FRAC
-    region = fitz.Rect(
-        rect.x0 + fx0 * rect.width, rect.y0 + fy0 * rect.height,
-        rect.x0 + fx1 * rect.width, rect.y0 + fy1 * rect.height,
-    )
-    try:
-        words = page.get_text("words")
-    except Exception:
-        return ""
-    parts = [w[4] for w in words if fitz.Rect(w[:4]) in region]
-    return " ".join(parts)
-
-
-def _order_page_pairs_by_border_similarity(src_doc, dst_doc):
-    """여러 페이지짜리 PDF에서 보더(Title block) 문구가 가장 비슷한 Source/Target
-    페이지 쌍을 먼저 시도하도록 순서를 정한다. 1페이지짜리 PDF에서는 순서가
-    바뀌지 않아 기존 동작과 동일하다."""
-    src_pages = list(src_doc)
-    dst_pages = list(dst_doc)
-    if len(src_pages) <= 1 and len(dst_pages) <= 1:
-        return list(itertools.product(src_pages, dst_pages))
-    src_texts = {sp.number: _extract_border_text(sp) for sp in src_pages}
-    dst_texts = {dp.number: _extract_border_text(dp) for dp in dst_pages}
-
-    def score(pair):
-        sp, dp = pair
-        st, dt = src_texts[sp.number], dst_texts[dp.number]
-        if not st or not dt:
-            return 0.0
-        return difflib.SequenceMatcher(None, st, dt).ratio()
-
-    pairs = list(itertools.product(src_pages, dst_pages))
-    pairs.sort(key=score, reverse=True)
-    return pairs
-
-
 # 사용자가 Bluebeam에서 직접 찍어두는 "수동 기준점" 마크업 색상. 이 색(마젠타)으로
 # 그려진 마크업을 Source/Target에서 각각 찾아, 같은 순서로 1:1 매칭해 가장 신뢰도
 # 높은 기준점으로 사용한다. 자동 Tag/Symbol 매칭이 오매칭될 위험이 있는 도면에서,
@@ -503,10 +456,7 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
         if log_fn:
             log_fn(msg)
 
-    page_pairs = _order_page_pairs_by_border_similarity(src_doc, dst_doc)
-    if len(page_pairs) > 1:
-        log(f"  [위치 보정] 보더(Title block) 문구 유사도로 페이지 매칭 순서 결정 "
-            f"({len(page_pairs)}개 조합 중 가장 유사한 쌍부터 시도)\n")
+    page_pairs = list(itertools.product(src_doc, dst_doc))
 
     for sp, dp in page_pairs:
         src_anchors = _extract_manual_anchor_points(sp)

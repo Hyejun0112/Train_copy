@@ -12,7 +12,6 @@ Source/Target PDF 두 개를 넣으면, 도면 내용은 출력하지 않고
 import sys
 import re
 import math
-import difflib
 import itertools
 
 try:
@@ -20,46 +19,6 @@ try:
 except ImportError:
     print("PyMuPDF가 설치되어 있지 않습니다. 'pip install PyMuPDF' 실행 후 다시 시도하세요.")
     sys.exit(1)
-
-
-# 보더(Title block, 보통 우측 하단)의 문구 유사도로 여러 페이지짜리 PDF에서
-# Source/Target 페이지를 자동으로 짝지어준다(위치 보정용 기준점은 아님).
-BORDER_REGION_FRAC = (0.6, 0.8, 1.0, 1.0)  # (x0, y0, x1, y1) 비율, 우측 하단
-
-
-def extract_border_text(page):
-    rect = page.rect
-    fx0, fy0, fx1, fy1 = BORDER_REGION_FRAC
-    region = fitz.Rect(
-        rect.x0 + fx0 * rect.width, rect.y0 + fy0 * rect.height,
-        rect.x0 + fx1 * rect.width, rect.y0 + fy1 * rect.height,
-    )
-    try:
-        words = page.get_text("words")
-    except Exception:
-        return ""
-    parts = [w[4] for w in words if fitz.Rect(w[:4]) in region]
-    return " ".join(parts)
-
-
-def order_page_pairs_by_border_similarity(src_doc, dst_doc):
-    src_pages = list(src_doc)
-    dst_pages = list(dst_doc)
-    if len(src_pages) <= 1 and len(dst_pages) <= 1:
-        return list(itertools.product(src_pages, dst_pages))
-    src_texts = {sp.number: extract_border_text(sp) for sp in src_pages}
-    dst_texts = {dp.number: extract_border_text(dp) for dp in dst_pages}
-
-    def score(pair):
-        sp, dp = pair
-        st, dt = src_texts[sp.number], dst_texts[dp.number]
-        if not st or not dt:
-            return 0.0
-        return difflib.SequenceMatcher(None, st, dt).ratio()
-
-    pairs = list(itertools.product(src_pages, dst_pages))
-    pairs.sort(key=score, reverse=True)
-    return pairs
 
 
 # 사용자가 Bluebeam에서 직접 찍어두는 마젠타색 수동 기준점 마크업
@@ -258,15 +217,7 @@ def main():
     for dp in dst_doc:
         list_cloud_shape_info(dp, log_prefix=f"[TARGET p{dp.number}]")
 
-    page_pairs = order_page_pairs_by_border_similarity(src_doc, dst_doc)
-    if len(page_pairs) > 1:
-        print(f"\n[보더 유사도] {len(page_pairs)}개 페이지 조합 중 유사한 쌍부터 시도:")
-        for sp, dp in page_pairs:
-            st = extract_border_text(sp)
-            dt = extract_border_text(dp)
-            ratio = difflib.SequenceMatcher(None, st, dt).ratio() if st and dt else 0.0
-            print(f"  Source p{sp.number} <-> Target p{dp.number}: 유사도 {ratio:.3f} "
-                  f"(Source 보더: '{st[:60]}', Target 보더: '{dt[:60]}')")
+    page_pairs = list(itertools.product(src_doc, dst_doc))
 
     best = None
     for sp, dp in page_pairs:
