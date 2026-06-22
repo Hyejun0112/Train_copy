@@ -12,12 +12,54 @@ Source/Target PDF 두 개를 넣으면, 도면 내용은 출력하지 않고
 import sys
 import re
 import math
+import difflib
+import itertools
 
 try:
     import fitz  # PyMuPDF
 except ImportError:
     print("PyMuPDF가 설치되어 있지 않습니다. 'pip install PyMuPDF' 실행 후 다시 시도하세요.")
     sys.exit(1)
+
+
+# 보더(Title block, 보통 우측 하단)의 문구 유사도로 여러 페이지짜리 PDF에서
+# Source/Target 페이지를 자동으로 짝지어준다(위치 보정용 기준점은 아님).
+BORDER_REGION_FRAC = (0.6, 0.8, 1.0, 1.0)  # (x0, y0, x1, y1) 비율, 우측 하단
+
+
+def extract_border_text(page):
+    rect = page.rect
+    fx0, fy0, fx1, fy1 = BORDER_REGION_FRAC
+    region = fitz.Rect(
+        rect.x0 + fx0 * rect.width, rect.y0 + fy0 * rect.height,
+        rect.x0 + fx1 * rect.width, rect.y0 + fy1 * rect.height,
+    )
+    try:
+        words = page.get_text("words")
+    except Exception:
+        return ""
+    parts = [w[4] for w in words if fitz.Rect(w[:4]) in region]
+    return " ".join(parts)
+
+
+def order_page_pairs_by_border_similarity(src_doc, dst_doc):
+    src_pages = list(src_doc)
+    dst_pages = list(dst_doc)
+    if len(src_pages) <= 1 and len(dst_pages) <= 1:
+        return list(itertools.product(src_pages, dst_pages))
+    src_texts = {sp.number: extract_border_text(sp) for sp in src_pages}
+    dst_texts = {dp.number: extract_border_text(dp) for dp in dst_pages}
+
+    def score(pair):
+        sp, dp = pair
+        st, dt = src_texts[sp.number], dst_texts[dp.number]
+        if not st or not dt:
+            return 0.0
+        return difflib.SequenceMatcher(None, st, dt).ratio()
+
+    pairs = list(itertools.product(src_pages, dst_pages))
+    pairs.sort(key=score, reverse=True)
+    return pairs
 
 
 # 사용자가 Bluebeam에서 직접 찍어두는 마젠타색 수동 기준점 마크업
@@ -170,47 +212,51 @@ def main():
     print(f"[SOURCE] 페이지 수: {src_doc.page_count}")
     print(f"[TARGET] 페이지 수: {dst_doc.page_count}")
 
+    page_pairs = order_page_pairs_by_border_similarity(src_doc, dst_doc)
+    if len(page_pairs) > 1:
+        print(f"\n[보더 유사도] {len(page_pairs)}개 페이지 조합 중 유사한 쌍부터 시도:")
+        for sp, dp in page_pairs:
+            st = extract_border_text(sp)
+            dt = extract_border_text(dp)
+            ratio = difflib.SequenceMatcher(None, st, dt).ratio() if st and dt else 0.0
+            print(f"  Source p{sp.number} <-> Target p{dp.number}: 유사도 {ratio:.3f} "
+                  f"(Source 보더: '{st[:60]}', Target 보더: '{dt[:60]}')")
+
     best = None
-    for sp in src_doc:
+    for sp, dp in page_pairs:
         src_anchors = extract_manual_anchor_points(sp, log_prefix="[SOURCE]")
-        for dp in dst_doc:
-            dst_anchors = extract_manual_anchor_points(dp, log_prefix="[TARGET]")
-            if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
-                src_sorted = sorted(src_anchors, key=lambda t: t[0])
-                dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
-                print(f"  >>> 수동 기준점 {len(src_sorted)}개 매칭 (이것만 사용)")
-                best = (sp.number, dp.number,
-                        [("수동기준점", s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)])
-                break
-        if best:
+        dst_anchors = extract_manual_anchor_points(dp, log_prefix="[TARGET]")
+        if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
+            src_sorted = sorted(src_anchors, key=lambda t: t[0])
+            dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
+            print(f"  >>> 수동 기준점 {len(src_sorted)}개 매칭 (이것만 사용)")
+            best = (sp.number, dp.number,
+                    [("수동기준점", s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)])
             break
 
     if not best:
-        for sp in src_doc:
+        for sp, dp in page_pairs:
             print(f"\n[SOURCE] 페이지 {sp.number} 크기: {sp.rect}")
             src_map = extract_tag_suffixes(sp, log_prefix="[SOURCE]")
             src_generic = extract_generic_tags(sp, log_prefix="[SOURCE]")
             src_symbols = extract_symbol_signatures(sp, log_prefix="[SOURCE]")
             if not src_map and not src_generic and not src_symbols:
                 continue
-            for dp in dst_doc:
-                print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
-                dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
-                dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
-                dst_symbols = extract_symbol_signatures(dp, log_prefix="[TARGET]")
-                common = sorted(set(src_map) & set(dst_map))
-                common_generic = sorted(set(src_generic) & set(dst_generic))
-                common_symbols = sorted(set(src_symbols) & set(dst_symbols), key=str)
-                total = len(common) + len(common_generic) + len(common_symbols)
-                print(f"  >>> 공통 매칭: 배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
-                      f"Symbol {len(common_symbols)}개 = {total}개")
-                if total >= 2:
-                    matches = [(s, src_map[s], dst_map[s]) for s in common]
-                    matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
-                    matches += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
-                    best = (sp.number, dp.number, matches)
-                    break
-            if best:
+            print(f"[TARGET] 페이지 {dp.number} 크기: {dp.rect}")
+            dst_map = extract_tag_suffixes(dp, log_prefix="[TARGET]")
+            dst_generic = extract_generic_tags(dp, log_prefix="[TARGET]")
+            dst_symbols = extract_symbol_signatures(dp, log_prefix="[TARGET]")
+            common = sorted(set(src_map) & set(dst_map))
+            common_generic = sorted(set(src_generic) & set(dst_generic))
+            common_symbols = sorted(set(src_symbols) & set(dst_symbols), key=str)
+            total = len(common) + len(common_generic) + len(common_symbols)
+            print(f"  >>> 공통 매칭: 배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
+                  f"Symbol {len(common_symbols)}개 = {total}개")
+            if total >= 2:
+                matches = [(s, src_map[s], dst_map[s]) for s in common]
+                matches += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
+                matches += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
+                best = (sp.number, dp.number, matches)
                 break
 
     if not best:

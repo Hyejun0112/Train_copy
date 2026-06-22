@@ -7,6 +7,8 @@ import tempfile
 import traceback
 import time
 import threading
+import difflib
+import itertools
 import multiprocessing as mp
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -413,6 +415,52 @@ def _border_corner_anchors(src_page, dst_page):
     return list(zip(s_corners, d_corners))
 
 
+# 보더(Title block)는 보통 우측 하단에 있고, 도면번호 등 도면을 식별하는 문구가
+# 적혀 있다. 위치 보정의 기준점으로는 쓸 수 없지만(보더 위치 자체는 Source/
+# Target에서 항상 동일하므로 이동량 정보가 없음), 여러 페이지짜리 PDF에서
+# "이 Source 페이지가 어느 Target 페이지와 같은 도면인지" 자동으로 골라주는
+# 용도로는 유용하다.
+_BORDER_REGION_FRAC = (0.6, 0.8, 1.0, 1.0)  # (x0, y0, x1, y1) 비율, 우측 하단
+
+
+def _extract_border_text(page):
+    rect = page.rect
+    fx0, fy0, fx1, fy1 = _BORDER_REGION_FRAC
+    region = fitz.Rect(
+        rect.x0 + fx0 * rect.width, rect.y0 + fy0 * rect.height,
+        rect.x0 + fx1 * rect.width, rect.y0 + fy1 * rect.height,
+    )
+    try:
+        words = page.get_text("words")
+    except Exception:
+        return ""
+    parts = [w[4] for w in words if fitz.Rect(w[:4]) in region]
+    return " ".join(parts)
+
+
+def _order_page_pairs_by_border_similarity(src_doc, dst_doc):
+    """여러 페이지짜리 PDF에서 보더(Title block) 문구가 가장 비슷한 Source/Target
+    페이지 쌍을 먼저 시도하도록 순서를 정한다. 1페이지짜리 PDF에서는 순서가
+    바뀌지 않아 기존 동작과 동일하다."""
+    src_pages = list(src_doc)
+    dst_pages = list(dst_doc)
+    if len(src_pages) <= 1 and len(dst_pages) <= 1:
+        return list(itertools.product(src_pages, dst_pages))
+    src_texts = {sp.number: _extract_border_text(sp) for sp in src_pages}
+    dst_texts = {dp.number: _extract_border_text(dp) for dp in dst_pages}
+
+    def score(pair):
+        sp, dp = pair
+        st, dt = src_texts[sp.number], dst_texts[dp.number]
+        if not st or not dt:
+            return 0.0
+        return difflib.SequenceMatcher(None, st, dt).ratio()
+
+    pairs = list(itertools.product(src_pages, dst_pages))
+    pairs.sort(key=score, reverse=True)
+    return pairs
+
+
 # 사용자가 Bluebeam에서 직접 찍어두는 "수동 기준점" 마크업 색상. 이 색(마젠타)으로
 # 그려진 마크업을 Source/Target에서 각각 찾아, 같은 순서로 1:1 매칭해 가장 신뢰도
 # 높은 기준점으로 사용한다. 자동 Tag/Symbol 매칭이 오매칭될 위험이 있는 도면에서,
@@ -455,47 +503,50 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
         if log_fn:
             log_fn(msg)
 
-    for sp in src_doc:
-        src_anchors = _extract_manual_anchor_points(sp)
-        for dp in dst_doc:
-            dst_anchors = _extract_manual_anchor_points(dp)
-            if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
-                src_sorted = sorted(src_anchors, key=lambda t: t[0])
-                dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
-                pairs = [(s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)]
-                skip_xrefs = {xref for xref, _ in src_sorted}
-                log(f"  [위치 보정] 수동 기준점(마젠타 마크업) {len(pairs)}개 발견 — "
-                    f"이 기준점만 사용 (Source p{sp.number + 1} → Target p{dp.number + 1})\n")
-                return sp.number, dp.number, pairs, skip_xrefs
+    page_pairs = _order_page_pairs_by_border_similarity(src_doc, dst_doc)
+    if len(page_pairs) > 1:
+        log(f"  [위치 보정] 보더(Title block) 문구 유사도로 페이지 매칭 순서 결정 "
+            f"({len(page_pairs)}개 조합 중 가장 유사한 쌍부터 시도)\n")
 
-    for sp in src_doc:
+    for sp, dp in page_pairs:
+        src_anchors = _extract_manual_anchor_points(sp)
+        dst_anchors = _extract_manual_anchor_points(dp)
+        if src_anchors and dst_anchors and len(src_anchors) == len(dst_anchors):
+            src_sorted = sorted(src_anchors, key=lambda t: t[0])
+            dst_sorted = sorted(dst_anchors, key=lambda t: t[0])
+            pairs = [(s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)]
+            skip_xrefs = {xref for xref, _ in src_sorted}
+            log(f"  [위치 보정] 수동 기준점(마젠타 마크업) {len(pairs)}개 발견 — "
+                f"이 기준점만 사용 (Source p{sp.number + 1} → Target p{dp.number + 1})\n")
+            return sp.number, dp.number, pairs, skip_xrefs
+
+    for sp, dp in page_pairs:
         src_map = _extract_tag_suffixes(sp)
         src_generic = _extract_generic_tags(sp)
         src_symbols = _extract_symbol_signatures(sp)
         if not src_map and not src_generic and not src_symbols:
             continue
-        for dp in dst_doc:
-            dst_map = _extract_tag_suffixes(dp)
-            dst_generic = _extract_generic_tags(dp)
-            dst_symbols = _extract_symbol_signatures(dp)
-            common = sorted(set(src_map) & set(dst_map))
-            common_generic = sorted(set(src_generic) & set(dst_generic))
-            common_symbols = sorted(set(src_symbols) & set(dst_symbols))
-            total = len(common) + len(common_generic) + len(common_symbols)
-            if total >= 2:
-                pairs = [(src_map[s], dst_map[s]) for s in common]
-                pairs += [(src_generic[s], dst_generic[s]) for s in common_generic]
-                pairs += [(src_symbols[s], dst_symbols[s]) for s in common_symbols]
-                pairs += _border_corner_anchors(sp, dp)
-                log(f"  [위치 보정] 자동 기준점 매칭 {total}개 발견 "
-                    f"(배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
-                    f"Symbol {len(common_symbols)}개, 모서리 4개 보조 추가, "
-                    f"Source p{sp.number + 1} → Target p{dp.number + 1})\n")
-                for s in common[:10]:
-                    log(f"    - {s}\n")
-                for s in common_generic[:10]:
-                    log(f"    - {s}\n")
-                return sp.number, dp.number, pairs, set()
+        dst_map = _extract_tag_suffixes(dp)
+        dst_generic = _extract_generic_tags(dp)
+        dst_symbols = _extract_symbol_signatures(dp)
+        common = sorted(set(src_map) & set(dst_map))
+        common_generic = sorted(set(src_generic) & set(dst_generic))
+        common_symbols = sorted(set(src_symbols) & set(dst_symbols))
+        total = len(common) + len(common_generic) + len(common_symbols)
+        if total >= 2:
+            pairs = [(src_map[s], dst_map[s]) for s in common]
+            pairs += [(src_generic[s], dst_generic[s]) for s in common_generic]
+            pairs += [(src_symbols[s], dst_symbols[s]) for s in common_symbols]
+            pairs += _border_corner_anchors(sp, dp)
+            log(f"  [위치 보정] 자동 기준점 매칭 {total}개 발견 "
+                f"(배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
+                f"Symbol {len(common_symbols)}개, 모서리 4개 보조 추가, "
+                f"Source p{sp.number + 1} → Target p{dp.number + 1})\n")
+            for s in common[:10]:
+                log(f"    - {s}\n")
+            for s in common_generic[:10]:
+                log(f"    - {s}\n")
+            return sp.number, dp.number, pairs, set()
     return None
 
 
