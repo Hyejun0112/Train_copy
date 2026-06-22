@@ -1204,13 +1204,45 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
             bx1 = max(bx1, r.x1); by1 = max(by1, r.y1)
             if r.x1 > pr.x0 and r.x0 < pr.x1 and r.y1 > pr.y0 and r.y0 < pr.y1:
                 n_onpage += 1
+        # 외형(AP)이 실제로 '그려지는지' 검사: 각 주석의 외형을 단독 렌더링해
+        # 빈(흰색/투명) 픽스맵이면 AP 자체가 깨진 것(=화면에 안 보이는 진짜 원인).
+        n_empty_ap = 0
+        n_render_ok = 0
+        for a in cp.annots() or []:
+            try:
+                pm = a.get_pixmap()
+            except Exception:
+                n_empty_ap += 1
+                continue
+            # 모든 픽셀이 동일(=내용 없음)하면 빈 외형으로 본다.
+            try:
+                samples = pm.samples
+                if not samples or len(set(samples[:4096])) <= 1:
+                    n_empty_ap += 1
+                else:
+                    n_render_ok += 1
+            except Exception:
+                n_empty_ap += 1
         chk.close()
         if n_annot:
             log(f"  [자가진단] 출력 파일 주석 {n_annot}개 중 페이지 안 {n_onpage}개 "
                 f"(페이지 {pr.width:.0f}x{pr.height:.0f}, "
                 f"주석 영역 x[{bx0:.0f}~{bx1:.0f}] y[{by0:.0f}~{by1:.0f}])\n")
+            log(f"  [자가진단] 외형 렌더링: 정상 {n_render_ok}개 / 빈외형 {n_empty_ap}개 "
+                f"(빈외형이 많으면 AP 복사가 깨진 것)\n")
         else:
             log("  [자가진단] ⚠ 출력 파일에 주석이 하나도 저장되지 않았습니다\n")
+
+        # 사람이 눈으로 확인할 수 있도록 페이지 전체를 PNG로도 저장한다.
+        try:
+            png_path = os.path.splitext(out_path)[0] + "_미리보기.png"
+            chk2 = fitz.open(out_path)
+            pix = chk2[dst_page_idx].get_pixmap(dpi=120, annots=True)
+            pix.save(png_path)
+            chk2.close()
+            log(f"  [자가진단] 미리보기 PNG 저장: {png_path}\n")
+        except Exception as e:
+            log(f"  [자가진단] 미리보기 PNG 저장 실패: {e}\n")
     except Exception as e:
         log(f"  [자가진단] 확인 실패: {e}\n")
 
