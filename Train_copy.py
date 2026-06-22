@@ -710,7 +710,27 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     else:
         old_matrix = fitz.Matrix(1, 0, 0, 1, 0, 0)
 
-    combined = old_matrix * matrix
+    # BBox는 Form 내부의 로컬 좌표일 뿐이며, 실제 페이지상의 절대 위치는
+    # PDF 스펙(12.5.5)에 따라 (BBox를 Matrix로 변환한 뒤) 그 결과를 Annotation의
+    # 실제 Rect에 맞춰주는 별도의 보정행렬(AA)에서 나온다. 이 AA를 빼고 BBox만
+    # 가지고 새 위치를 계산하면 원본 Rect 정보가 통째로 사라져 마크업이 전부
+    # 원점 근처로 쏠려버린다. 원본 Rect를 반영해 AA를 직접 구해 합성한다.
+    orig_rect = src_annot.rect
+    orig_corners = [
+        fitz.Point(bbox.x0, bbox.y0) * old_matrix,
+        fitz.Point(bbox.x1, bbox.y0) * old_matrix,
+        fitz.Point(bbox.x1, bbox.y1) * old_matrix,
+        fitz.Point(bbox.x0, bbox.y1) * old_matrix,
+    ]
+    tb_xs = [c.x for c in orig_corners]
+    tb_ys = [c.y for c in orig_corners]
+    tb = fitz.Rect(min(tb_xs), min(tb_ys), max(tb_xs), max(tb_ys))
+    sx = orig_rect.width / tb.width if tb.width > 1e-6 else 1.0
+    sy = orig_rect.height / tb.height if tb.height > 1e-6 else 1.0
+    aa = fitz.Matrix(sx, 0, 0, sy,
+                      orig_rect.x0 - tb.x0 * sx, orig_rect.y0 - tb.y0 * sy)
+
+    combined = old_matrix * aa * matrix
     corners = [
         fitz.Point(bbox.x0, bbox.y0) * combined,
         fitz.Point(bbox.x1, bbox.y0) * combined,
