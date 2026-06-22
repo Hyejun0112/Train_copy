@@ -774,14 +774,29 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
 
         page_xref = dst_page.xref
         kind, annots_val = dst_doc.xref_get_key(page_xref, "Annots")
-        existing = []
-        if kind == "array" and annots_val:
-            existing = [int(x) for x in re.findall(r'(\d+)\s+0\s+R', annots_val)]
-        existing.append(new_annot_xref)
-        dst_doc.xref_set_key(
-            page_xref, "Annots",
-            "[" + " ".join(f"{x} 0 R" for x in existing) + "]"
-        )
+        if kind == "array":
+            # 페이지가 /Annots를 직접 배열로 들고 있는 경우: 끝에 추가
+            inner = (annots_val or "").strip()
+            if inner.startswith("[") and inner.endswith("]"):
+                inner = inner[1:-1]
+            dst_doc.xref_set_key(
+                page_xref, "Annots", f"[{inner} {new_annot_xref} 0 R]"
+            )
+        elif kind == "xref":
+            # /Annots가 별도 배열 객체를 간접참조하는 경우: 그 객체 자체에
+            # 추가해야 한다(페이지의 키를 덮어쓰면 이전에 추가된 마크업과
+            # 원본 마크업까지 전부 사라진다).
+            m = re.match(r'(\d+)\s+0\s+R', (annots_val or "").strip())
+            if not m:
+                return False
+            arr_xref = int(m.group(1))
+            arr_str = dst_doc.xref_object(arr_xref, compressed=False) or "[]"
+            inner = arr_str.strip()
+            if inner.startswith("[") and inner.endswith("]"):
+                inner = inner[1:-1]
+            dst_doc.update_object(arr_xref, f"[{inner} {new_annot_xref} 0 R]")
+        else:
+            dst_doc.xref_set_key(page_xref, "Annots", f"[{new_annot_xref} 0 R]")
     except Exception:
         return False
 
