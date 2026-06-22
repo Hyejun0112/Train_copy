@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# PyInstaller 빌드 산출물 (배포 EXE는 git에 올리지 않음)
+build/
+dist/
+*.exe
