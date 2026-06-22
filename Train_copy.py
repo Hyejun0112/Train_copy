@@ -665,7 +665,19 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     # 실제 Rect에 맞춰주는 별도의 보정행렬(AA)에서 나온다. 이 AA를 빼고 BBox만
     # 가지고 새 위치를 계산하면 원본 Rect 정보가 통째로 사라져 마크업이 전부
     # 원점 근처로 쏠려버린다. 원본 Rect를 반영해 AA를 직접 구해 합성한다.
-    orig_rect = src_annot.rect
+    #
+    # 주의: 외형 스트림/BBox/Matrix/Rect는 모두 PDF 원좌표계(y가 위로 증가)에
+    # 있다. PyMuPDF의 annot.rect는 y-down으로 변환된 값이라 좌표계가 달라
+    # 섞으면 상하가 뒤집힌다. 여기서는 원본 /Rect를 PDF 원좌표로 직접 읽는다.
+    try:
+        _, rect_val = src_doc.xref_get_key(src_annot.xref, "Rect")
+        rv = _parse_pdf_floats(rect_val or "")
+    except Exception:
+        rv = []
+    if len(rv) != 4:
+        return False
+    orig_rect = fitz.Rect(min(rv[0], rv[2]), min(rv[1], rv[3]),
+                          max(rv[0], rv[2]), max(rv[1], rv[3]))
     orig_corners = [
         fitz.Point(bbox.x0, bbox.y0) * old_matrix,
         fitz.Point(bbox.x1, bbox.y0) * old_matrix,
@@ -680,7 +692,16 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     aa = fitz.Matrix(sx, 0, 0, sy,
                       orig_rect.x0 - tb.x0 * sx, orig_rect.y0 - tb.y0 * sy)
 
-    combined = old_matrix * aa * matrix
+    # 위치 보정 matrix는 PyMuPDF의 y-down 좌표계에서 구한 것이다. 이를 그대로
+    # PDF 외형(y-up)에 적용하면 상하가 반전된다. 페이지 높이만큼 y축을 뒤집는
+    # 변환 F로 켤레변환(F_src · matrix · F_dst)해 y-up 좌표계로 옮긴다.
+    h_src = src_annot.parent.rect.height
+    h_dst = dst_page.rect.height
+    flip_src = fitz.Matrix(1, 0, 0, -1, 0, h_src)
+    flip_dst = fitz.Matrix(1, 0, 0, -1, 0, h_dst)
+    matrix_pdf = flip_src * matrix * flip_dst
+
+    combined = old_matrix * aa * matrix_pdf
     corners = [
         fitz.Point(bbox.x0, bbox.y0) * combined,
         fitz.Point(bbox.x1, bbox.y0) * combined,
