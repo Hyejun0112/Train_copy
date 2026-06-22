@@ -88,6 +88,18 @@ def extract_manual_anchor_points(page, log_prefix=""):
     return found
 
 
+def list_all_annot_colors(page, log_prefix=""):
+    """모든 마크업의 실제 색상 수치(stroke/fill, 0~1 범위)를 출력한다.
+    마젠타(1,0,1) 인식이 안 될 때 실제 저장된 색상값을 확인하기 위한 진단용."""
+    annots = list(page.annots() or [])
+    print(f"{log_prefix}  전체 마크업 개수: {len(annots)}개")
+    for annot in annots:
+        colors = annot.colors or {}
+        subtype = annot.type[1]
+        print(f"{log_prefix}    - xref={annot.xref} type={subtype} "
+              f"stroke={colors.get('stroke')} fill={colors.get('fill')}")
+
+
 # Train 번호(앞쪽 2~4자리 숫자)만 다르고 나머지는 동일한 Tag 패턴
 # 예: "504-CWS-0100-400-ACB3B02SE51-NN" / "604-CWS-0100-400-ACB3B02SE51-NN"
 TAG_RE = re.compile(r'^(\d{2,4})-([A-Za-z0-9][A-Za-z0-9-]{4,})$')
@@ -233,6 +245,11 @@ def main():
             best = (sp.number, dp.number,
                     [("수동기준점", s[1], d[1]) for s, d in zip(src_sorted, dst_sorted)])
             break
+        else:
+            print(f"  >>> 수동 기준점 미매칭(Source {len(src_anchors)}개 / Target {len(dst_anchors)}개) "
+                  f"— 전체 마크업 색상값 진단 출력:")
+            list_all_annot_colors(sp, log_prefix="[SOURCE]")
+            list_all_annot_colors(dp, log_prefix="[TARGET]")
 
     if not best:
         for sp, dp in page_pairs:
