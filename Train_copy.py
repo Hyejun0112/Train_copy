@@ -829,14 +829,15 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     aa = fitz.Matrix(sx, 0, 0, sy,
                       orig_rect.x0 - tb.x0 * sx, orig_rect.y0 - tb.y0 * sy)
 
-    # 위치 보정 matrix는 PyMuPDF의 y-down 좌표계에서 구한 것이다. 이를 그대로
-    # PDF 외형(y-up)에 적용하면 상하가 반전된다. 페이지 높이만큼 y축을 뒤집는
-    # 변환 F로 켤레변환(F_src · matrix · F_dst)해 y-up 좌표계로 옮긴다.
-    h_src = src_annot.parent.rect.height
-    h_dst = dst_page.rect.height
-    flip_src = fitz.Matrix(1, 0, 0, -1, 0, h_src)
-    flip_dst = fitz.Matrix(1, 0, 0, -1, 0, h_dst)
-    matrix_pdf = flip_src * matrix * flip_dst
+    # 위치 보정 matrix는 PyMuPDF의 fitz 좌표계(y-down, MediaBox 원점 보정 포함)에서
+    # 구한 것이다. 외형(AP)은 PDF 원좌표계(y-up)에 있으므로 좌표계를 변환해야 한다.
+    # 페이지 높이로 단순히 y를 뒤집는 방식은 MediaBox 원점이 (0,0)이 아니거나
+    # 페이지가 회전(/Rotate)된 도면에서 어긋나 마크업이 화면 밖으로 날아간다.
+    # PyMuPDF가 제공하는 정확한 페이지 변환행렬을 쓴다:
+    #   transformation_matrix : PDF → fitz,  그 역행렬 : fitz → PDF
+    t_src = src_annot.parent.transformation_matrix      # PDF → fitz (Source)
+    t_dst_inv = ~dst_page.transformation_matrix         # fitz → PDF (Target)
+    matrix_pdf = t_src * matrix * t_dst_inv
 
     combined = old_matrix * aa * matrix_pdf
     corners = [
