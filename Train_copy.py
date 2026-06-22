@@ -648,6 +648,124 @@ def _idw_offset(center, pairs, base_matrix, power=2.0):
     return (ox / total_w, oy / total_w)
 
 
+# ── CAD 형상 스냅(Target 도면의 실제 원/선에 마크업을 달라붙임) ───────────────
+# 기준점(IDW) 보정으로도 못 잡는 미세 어긋남을, Target PDF에 실제로 그려진
+# 도형(계장 심볼 원 / 배관선)에 마크업을 '가까울 때만' 달라붙여 해결한다.
+SNAP_ENABLED = True       # 형상 스냅 전체 토글
+SNAP_LINE_DIST = 14.0     # 선에 이 거리 안이면 선 위로 스냅(pt)
+SNAP_MAX_MOVE = 60.0      # 스냅 이동량이 이보다 크면 오스냅으로 보고 무시(pt)
+
+
+def _extract_target_geometry(page):
+    """Target 페이지의 벡터 도형을 추출해 원(계장 심볼)·수평선·수직선 목록으로
+    돌려준다(페이지에 캐시). 좌표는 fitz 좌표계."""
+    cache = getattr(page, "_snap_geom_cache", None)
+    if cache is not None:
+        return cache
+    circles = []   # (cx, cy, r)
+    hlines = []    # (x0, x1, y)
+    vlines = []    # (x, y0, y1)
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        drawings = []
+    for d in drawings:
+        rect = d.get("rect")
+        items = d.get("items", []) or []
+        n_curve = sum(1 for it in items if it and it[0] == "c")
+        # 원/타원: 곡선 위주 + bbox가 거의 정사각 + 심볼 크기 범위
+        if rect is not None and n_curve >= 2:
+            w, h = rect.width, rect.height
+            if w > 4 and h > 4 and 0.65 < (w / h) < 1.55 and max(w, h) < 130:
+                circles.append(((rect.x0 + rect.x1) / 2.0,
+                                (rect.y0 + rect.y1) / 2.0, max(w, h) / 2.0))
+        # 직선 세그먼트
+        for it in items:
+            if not it or it[0] != "l":
+                continue
+            p1, p2 = it[1], it[2]
+            if abs(p1.y - p2.y) < 0.6 and abs(p1.x - p2.x) > 8:
+                hlines.append((min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2.0))
+            elif abs(p1.x - p2.x) < 0.6 and abs(p1.y - p2.y) > 8:
+                vlines.append(((p1.x + p2.x) / 2.0, min(p1.y, p2.y), max(p1.y, p2.y)))
+    cache = {"circles": circles, "hlines": hlines, "vlines": vlines}
+    try:
+        page._snap_geom_cache = cache
+    except Exception:
+        pass
+    return cache
+
+
+def _cluster_indices(rects, gap=12.0):
+    """transform된 마크업 rect들을 근접(겹치거나 gap 이내)끼리 묶어 클러스터
+    id 리스트를 돌려준다(union-find). 구름+지시선+콜아웃처럼 붙어있는 멀티파트가
+    한 덩어리로 묶여, 스냅을 클러스터 단위로 똑같이 적용해 안 어긋나게 한다."""
+    n = len(rects)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    def near(a, b):
+        return not (a.x0 - gap > b.x1 or b.x0 - gap > a.x1 or
+                    a.y0 - gap > b.y1 or b.y0 - gap > a.y1)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if near(rects[i], rects[j]):
+                union(i, j)
+    return [find(i) for i in range(n)]
+
+
+def _snap_offset_for_cluster(centers, rects, geom):
+    """클러스터에 속한 마크업들의 중심/rect를 보고, Target 도형(원/선)에
+    '가까울 때만' 달라붙도록 클러스터 전체에 적용할 평행이동 (dx,dy)를 돌려준다.
+    스냅 대상이 없거나 이동량이 과하면 (0,0)."""
+    best = None
+    best_d = None
+    # 1) 계장 Tag → 심볼 원 중심: 멤버 중심이 어떤 원 안(반경*1.3)에 들면 그 중심으로
+    for cx, cy in centers:
+        for ccx, ccy, r in geom["circles"]:
+            d = math.hypot(cx - ccx, cy - ccy)
+            if d < r * 1.3 and (best_d is None or d < best_d):
+                best_d = d
+                best = (ccx - cx, ccy - cy)
+    if best is not None:
+        if math.hypot(*best) <= SNAP_MAX_MOVE:
+            return best, "원중심"
+        return (0.0, 0.0), None
+    # 2) Reducer/MIN → 가장 가까운 선 위로(수직 스냅). 작은 마크업만 대상.
+    best = None
+    best_d = None
+    for (cx, cy), rc in zip(centers, rects):
+        size = max(rc.width, rc.height)
+        if size > 160:
+            continue  # 너무 큰 마크업은 선 스냅 제외(큰 구름 등)
+        for x0, x1, y in geom["hlines"]:
+            if x0 - 6 <= cx <= x1 + 6:
+                d = abs(cy - y)
+                if d < SNAP_LINE_DIST and (best_d is None or d < best_d):
+                    best_d = d
+                    best = (0.0, y - cy)
+        for x, y0, y1 in geom["vlines"]:
+            if y0 - 6 <= cy <= y1 + 6:
+                d = abs(cx - x)
+                if d < SNAP_LINE_DIST and (best_d is None or d < best_d):
+                    best_d = d
+                    best = (x - cx, 0.0)
+    if best is not None and math.hypot(*best) <= SNAP_MAX_MOVE:
+        return best, "라인"
+    return (0.0, 0.0), None
+
+
 def _is_finite_point(pt) -> bool:
     return math.isfinite(pt[0]) and math.isfinite(pt[1]) and \
         abs(pt[0]) < 1_000_000 and abs(pt[1]) < 1_000_000
@@ -1207,18 +1325,51 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
 
-    copied, skipped = 0, 0
-    for annot in src_page.annots() or []:
-        if annot.xref in skip_xrefs:
-            continue  # 수동 기준점 마크업 자체는 복사하지 않음
-        # 이 마크업 중심 주변 기준점들로 국소 평행이동 보정량을 구해 전역 변환에 합성
-        c = annot.rect
+    # 1차 패스: 마크업마다 전역+IDW 변환행렬과 transform된 rect/center를 미리 구한다.
+    annots = [a for a in (src_page.annots() or []) if a.xref not in skip_xrefs]
+    matrices = []   # 각 마크업의 base*IDW 행렬
+    t_rects = []    # transform된 rect(fitz)
+    t_centers = []  # transform된 중심
+    for a in annots:
+        c = a.rect
         center = ((c.x0 + c.x1) / 2.0, (c.y0 + c.y1) / 2.0)
         ox, oy = _idw_offset(center, pairs, base_matrix)
-        matrix = base_matrix * fitz.Matrix(1, 0, 0, 1, ox, oy)
-        ok = _clone_annot_with_appearance(annot, dst_page, matrix)
+        m = base_matrix * fitz.Matrix(1, 0, 0, 1, ox, oy)
+        tr = a.rect * m
+        matrices.append(m)
+        t_rects.append(tr)
+        t_centers.append(((tr.x0 + tr.x1) / 2.0, (tr.y0 + tr.y1) / 2.0))
+
+    # 형상 스냅: 연결된 멀티파트가 안 어긋나도록 클러스터 단위로 같은 양만큼 스냅.
+    snap_off = [(0.0, 0.0)] * len(annots)
+    n_snap = {"원중심": 0, "라인": 0}
+    if SNAP_ENABLED and annots:
+        geom = _extract_target_geometry(dst_page)
+        log(f"  [스냅] Target 형상 추출: 원 {len(geom['circles'])}개 / "
+            f"수평선 {len(geom['hlines'])}개 / 수직선 {len(geom['vlines'])}개\n")
+        cl = _cluster_indices(t_rects)
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for i, cid in enumerate(cl):
+            groups[cid].append(i)
+        for members in groups.values():
+            ctr = [t_centers[i] for i in members]
+            rcs = [t_rects[i] for i in members]
+            (dx, dy), kind = _snap_offset_for_cluster(ctr, rcs, geom)
+            if kind:
+                n_snap[kind] += 1
+                for i in members:
+                    snap_off[i] = (dx, dy)
+        log(f"  [스냅] 적용: 원중심 {n_snap['원중심']}개 클러스터 / "
+            f"라인 {n_snap['라인']}개 클러스터\n")
+
+    copied, skipped = 0, 0
+    for a, m, (sx, sy) in zip(annots, matrices, snap_off):
+        if sx or sy:
+            m = m * fitz.Matrix(1, 0, 0, 1, sx, sy)
+        ok = _clone_annot_with_appearance(a, dst_page, m)
         if not ok:
-            ok = _copy_annot_with_transform(annot, dst_page, matrix)
+            ok = _copy_annot_with_transform(a, dst_page, m)
         if ok:
             copied += 1
         else:
