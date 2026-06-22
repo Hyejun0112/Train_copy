@@ -1270,6 +1270,36 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
                     n_render_ok += 1
             except Exception:
                 n_empty_ap += 1
+        # 출력된 각 마크업의 외형(AP) /Matrix에 실제로 회전이 들어갔는지 측정.
+        # 도면이 안 돌아갔다면 모든 각도가 0°에 가까워야 한다. 0이 아니면 기울어짐의
+        # 원인이 우리 변환(또는 원본 마크업 자체의 회전)임을 데이터로 확정한다.
+        n_tilt = 0
+        max_tilt = 0.0
+        sum_tilt = 0.0
+        n_meas = 0
+        for a in cp.annots() or []:
+            apx = _annot_ap_normal_xref(chk, a.xref)
+            if apx is None:
+                continue
+            try:
+                fo = chk.xref_object(apx, compressed=False)
+            except Exception:
+                continue
+            mm = re.search(r'/Matrix\s*\[([^\]]+)\]', fo or "")
+            if not mm:
+                continue
+            mv = _parse_pdf_floats(mm.group(1))
+            if len(mv) != 6:
+                continue
+            ang = math.degrees(math.atan2(mv[1], mv[0]))
+            # ±180/±90 부근(상하/좌우 반전 표현)은 회전 아님 → 0 기준 잔차만 본다
+            ang = ((ang + 180) % 90) - 0  # 0~90 범위로 접되, 작은 잔차 판별용
+            ang = min(abs(ang), abs(ang - 90))
+            n_meas += 1
+            sum_tilt += ang
+            max_tilt = max(max_tilt, ang)
+            if ang > 0.5:
+                n_tilt += 1
         chk.close()
         if n_annot:
             log(f"  [자가진단] 출력 파일 주석 {n_annot}개 중 페이지 안 {n_onpage}개 "
@@ -1277,6 +1307,10 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
                 f"주석 영역 x[{bx0:.0f}~{bx1:.0f}] y[{by0:.0f}~{by1:.0f}])\n")
             log(f"  [자가진단] 외형 렌더링: 정상 {n_render_ok}개 / 빈외형 {n_empty_ap}개 "
                 f"(빈외형이 많으면 AP 복사가 깨진 것)\n")
+            if n_meas:
+                log(f"  [자가진단] 마크업 기울기: 측정 {n_meas}개 중 0.5°↑ {n_tilt}개 "
+                    f"(평균 {sum_tilt/n_meas:.2f}°, 최대 {max_tilt:.2f}°) "
+                    f"— 0에 가까우면 우리 변환은 안 기울어진 것\n")
         else:
             log("  [자가진단] ⚠ 출력 파일에 주석이 하나도 저장되지 않았습니다\n")
 
