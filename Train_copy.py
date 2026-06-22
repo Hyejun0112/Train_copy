@@ -1130,6 +1130,35 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     dst_doc.save(out_path)
     src_doc.close()
     dst_doc.close()
+
+    # 저장 결과 자가진단: 출력 파일을 다시 열어 실제로 마크업이 페이지 안에
+    # 들어있는지 확인한다(복사 개수는 양수인데 화면엔 안 보이는 경우, 마크업이
+    # 페이지 밖으로 날아갔는지 / 아예 저장이 안 됐는지 구분하기 위함).
+    try:
+        chk = fitz.open(out_path)
+        cp = chk[dst_page_idx]
+        pr = cp.rect
+        n_annot = 0
+        n_onpage = 0
+        bx0 = by0 = float("inf")
+        bx1 = by1 = float("-inf")
+        for a in cp.annots() or []:
+            n_annot += 1
+            r = a.rect
+            bx0 = min(bx0, r.x0); by0 = min(by0, r.y0)
+            bx1 = max(bx1, r.x1); by1 = max(by1, r.y1)
+            if r.x1 > pr.x0 and r.x0 < pr.x1 and r.y1 > pr.y0 and r.y0 < pr.y1:
+                n_onpage += 1
+        chk.close()
+        if n_annot:
+            log(f"  [자가진단] 출력 파일 주석 {n_annot}개 중 페이지 안 {n_onpage}개 "
+                f"(페이지 {pr.width:.0f}x{pr.height:.0f}, "
+                f"주석 영역 x[{bx0:.0f}~{bx1:.0f}] y[{by0:.0f}~{by1:.0f}])\n")
+        else:
+            log("  [자가진단] ⚠ 출력 파일에 주석이 하나도 저장되지 않았습니다\n")
+    except Exception as e:
+        log(f"  [자가진단] 확인 실패: {e}\n")
+
     return copied, skipped
 
 
