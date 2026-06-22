@@ -7,7 +7,7 @@ Source/Target PDF 두 개를 넣으면, 도면 내용은 출력하지 않고
 만 출력합니다.
 
 사용법:
-    python debug_border.py <source.pdf> <target.pdf>
+    python debug.py <source.pdf> <target.pdf>
 """
 import sys
 import re
@@ -213,7 +213,7 @@ def extract_symbol_signatures(page, log_prefix=""):
 
 def main():
     if len(sys.argv) != 3:
-        print("사용법: python debug_border.py <source.pdf> <target.pdf>")
+        print("사용법: python debug.py <source.pdf> <target.pdf>")
         sys.exit(1)
 
     src_path, dst_path = sys.argv[1], sys.argv[2]
