@@ -669,6 +669,68 @@ def _pdf_text_string(text) -> str:
     return f"<FEFF{raw.hex()}>"
 
 
+def _graft_pdf_object(src_doc, dst_doc, src_xref, xref_map):
+    """src_doc의 객체(src_xref)와 그 객체가 간접참조하는 모든 하위 객체를
+    dst_doc로 깊은 복사한다. 외형 스트림(Form XObject)을 복사할 때 그 안의
+    /Resources(글꼴 등)까지 같이 가져오기 위함 — 스트림 바이트만 복사하면
+    글꼴 자원이 빠져 Helvetica 기본값으로 깨진다.
+    xref_map: {원본xref: 새xref} (순환참조 방지 및 중복복사 방지)."""
+    if src_xref in xref_map:
+        return xref_map[src_xref]
+    new_xref = dst_doc.get_new_xref()
+    xref_map[src_xref] = new_xref  # 순환참조 대비 먼저 등록
+    try:
+        obj_str = src_doc.xref_object(src_xref, compressed=False)
+    except Exception:
+        return new_xref
+
+    def repl(m):
+        ref = int(m.group(1))
+        return f"{_graft_pdf_object(src_doc, dst_doc, ref, xref_map)} 0 R"
+
+    new_str = re.sub(r'\b(\d+)\s+0\s+R\b', repl, obj_str)
+
+    is_stream = False
+    try:
+        is_stream = src_doc.xref_is_stream(src_xref)
+    except Exception:
+        is_stream = False
+
+    if is_stream:
+        data = None
+        try:
+            data = src_doc.xref_stream(src_xref)  # 압축 해제된 바이트
+        except Exception:
+            data = None
+        if data is not None:
+            # /Filter·/Length는 update_stream(compress=True)가 다시 채우므로 제거
+            new_str = re.sub(r'/Filter\s*(?:/[A-Za-z0-9]+|\[[^\]]*\])', '', new_str)
+            new_str = re.sub(r'/Length\s+\d+', '', new_str)
+            dst_doc.update_object(new_xref, new_str)
+            dst_doc.update_stream(new_xref, data, compress=True)
+        else:
+            # 압축 해제 실패(예: 이미지) → 원본 raw 바이트 그대로 복사
+            try:
+                raw = src_doc.xref_stream_raw(src_xref)
+                dst_doc.update_object(new_xref, new_str)
+                dst_doc.update_stream(new_xref, raw, compress=False)
+            except Exception:
+                dst_doc.update_object(new_xref, new_str)
+    else:
+        dst_doc.update_object(new_xref, new_str)
+    return new_xref
+
+
+# 원본 마크업에서 새 마크업으로 그대로 옮겨야 하는 스타일/속성 키들.
+# 특히 /DA·/DS는 Bluebeam이 글꼴/크기/색상 속성을 읽어오는 곳이라, 이걸
+# 복사하지 않으면 속성창에 Helvetica 같은 기본값이 표시된다(외형 자체는
+# AP로 보존되더라도 별개).
+_ANNOT_STYLE_KEYS = (
+    "DA", "DS", "Q", "RC", "C", "IC", "IT", "CL", "BS", "BE",
+    "RD", "CA", "Rotate", "Name", "NM", "Border", "BorderStyle",
+)
+
+
 def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     """원본 마크업의 실제 외형(AP, appearance stream)을 그대로 재사용해
     위치/회전/스케일만 적용한다. Bluebeam의 구름(cloud) 테두리, 글꼴/색상 등
@@ -763,15 +825,16 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
     content = (src_annot.info or {}).get("content", "") or ""
 
     try:
-        new_ap_xref = dst_doc.get_new_xref()
-        dst_doc.update_object(
-            new_ap_xref,
-            "<< /Type /XObject /Subtype /Form "
-            f"/BBox [{bbox.x0:.4f} {bbox.y0:.4f} {bbox.x1:.4f} {bbox.y1:.4f}] "
-            f"/Matrix [{combined.a:.6f} {combined.b:.6f} {combined.c:.6f} "
-            f"{combined.d:.6f} {combined.e:.4f} {combined.f:.4f}] >>"
+        # 외형(AP) Form XObject를 /Resources(글꼴 등)까지 통째로 깊은 복사한 뒤,
+        # 위치/회전/스케일만 새 /Matrix로 덮어쓴다. 스트림 바이트만 복사하면
+        # 글꼴 자원이 빠져 글자가 Helvetica 기본값으로 깨진다.
+        xref_map = {}
+        new_ap_xref = _graft_pdf_object(src_doc, dst_doc, ap_xref, xref_map)
+        dst_doc.xref_set_key(
+            new_ap_xref, "Matrix",
+            f"[{combined.a:.6f} {combined.b:.6f} {combined.c:.6f} "
+            f"{combined.d:.6f} {combined.e:.4f} {combined.f:.4f}]"
         )
-        dst_doc.update_stream(new_ap_xref, stream)
 
         contents_kv = ""
         if content:
@@ -784,6 +847,28 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
             f" /Rect [{new_rect.x0:.4f} {new_rect.y0:.4f} {new_rect.x1:.4f} {new_rect.y1:.4f}] "
             f"/AP << /N {new_ap_xref} 0 R >> /CA {opacity}{contents_kv} /F 4 >>"
         )
+
+        # 원본 마크업의 스타일/속성 키(특히 /DA·/DS = Bluebeam이 읽는 글꼴 정보)를
+        # 그대로 복사한다. 간접참조면 그 객체도 깊은 복사해 dst로 가져온다.
+        for key in _ANNOT_STYLE_KEYS:
+            try:
+                kkind, kval = src_doc.xref_get_key(src_annot.xref, key)
+            except Exception:
+                continue
+            if kkind == "null" or not kval:
+                continue
+            if kkind == "xref":
+                m_ref = re.match(r'(\d+)\s+0\s+R', kval.strip())
+                if not m_ref:
+                    continue
+                grafted = _graft_pdf_object(
+                    src_doc, dst_doc, int(m_ref.group(1)), xref_map
+                )
+                kval = f"{grafted} 0 R"
+            try:
+                dst_doc.xref_set_key(new_annot_xref, key, kval)
+            except Exception:
+                continue
 
         page_xref = dst_page.xref
         kind, annots_val = dst_doc.xref_get_key(page_xref, "Annots")
