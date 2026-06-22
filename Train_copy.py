@@ -26,6 +26,8 @@ WAIT_OPEN  = 5
 WAIT_SHORT = 0.8
 WAIT_PASTE = 2.5
 
+_APP_TITLE = "Bluebeam Markup Auto-Copy"  # 우리 GUI 창 제목(close_bluebeam_app에서 자기 자신 제외용)
+
 # ── 상태 변수 ──────────────────────────────────────────────
 src_folder    = ""
 dst_folder    = ""
@@ -121,11 +123,17 @@ def close_bluebeam_app():
     """현재 Bluebeam 창을 완전히 종료한다.
     - 전체화면 상태로 남아 응답 없음(렉)이 발생하는 것을 방지하기 위해 먼저 Escape로 빠져나옴
     - 작업이 끝난 PDF 창이 계속 쌓이지 않도록 Alt+F4로 앱 전체를 닫음
-    - 완전히 닫힐 때까지 최대 15초 대기"""
+    - 완전히 닫힐 때까지 최대 15초 대기
+    주의: 우리 GUI 창 제목이 "Bluebeam Markup Auto-Copy"라서 단순히 제목에
+    "Bluebeam"이 들어간 창을 찾으면 우리 자신의 창도 걸려서 Alt+F4로 우리
+    프로그램이 종료되어 버린다(위치 보정 모드는 Bluebeam을 전혀 안 쓰는데도
+    이 부작용으로 작업 완료 후 프로그램이 꺼지는 문제가 있었음). 우리 창은
+    제외하고 진짜 Bluebeam 창만 대상으로 한다."""
     pyautogui.press('escape')
     time.sleep(WAIT_SHORT)
 
-    wins = gw.getWindowsWithTitle("Bluebeam")
+    wins = [w for w in gw.getWindowsWithTitle("Bluebeam")
+            if w.title != _APP_TITLE]
     if not wins:
         return
     try:
@@ -1302,7 +1310,7 @@ def process_source_group(src: str, targets: list, log_fn=None, stop_check=None,
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bluebeam Markup Auto-Copy")
+        self.title(_APP_TITLE)
         self.resizable(True, True)
         self.minsize(900, 640)
         self._build_ui()
@@ -2120,9 +2128,11 @@ class App(tk.Tk):
 
         self._write_report(report_rows)
 
-        # 모든 작업 완료 후 Bluebeam 완전 종료
-        self._log("\n[마무리] Bluebeam 종료 중…\n")
-        close_bluebeam_app()
+        # 모든 작업 완료 후 Bluebeam 완전 종료 (위치 보정 모드는 Bluebeam을
+        # 전혀 쓰지 않으므로 건너뜀)
+        if not pos_correction_enabled:
+            self._log("\n[마무리] Bluebeam 종료 중…\n")
+            close_bluebeam_app()
 
         self._log("✅ 모든 작업 완료!\n")
         self._set_status("완료 ✅", "#a6e3a1")
