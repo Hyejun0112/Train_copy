@@ -1,4 +1,6 @@
 import os
+import sys
+import subprocess
 import csv
 import math
 import re
@@ -81,6 +83,22 @@ def open_pdf(path: str):
     time.sleep(WAIT_OPEN)
     focus_bluebeam()
     fit_page()
+
+
+def open_folder(path: str) -> bool:
+    """탐색기/파인더로 폴더를 연다. 성공 여부를 반환(실패해도 예외는 안 던짐)."""
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        return False
 
 
 def close_pdf_discard():
@@ -1994,8 +2012,10 @@ class App(tk.Tk):
         self._log("✅ 모든 작업 완료!\n")
         self._set_status("완료 ✅", "#a6e3a1")
 
-        if output_folder:
-            os.startfile(output_folder)
+        if open_folder(output_folder):
+            self._log(f"📂 Output 폴더 열기: {output_folder}\n")
+        else:
+            self._log(f"⚠ Output 폴더를 열지 못했습니다: {output_folder}\n")
 
     def _process_group_with_position_correction(self, src_path, targets,
                                                  filter_settings, report_rows,
