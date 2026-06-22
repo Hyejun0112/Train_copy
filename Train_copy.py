@@ -1134,14 +1134,18 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
 
 def _position_correction_subprocess_main(src_path, dst_path, out_path, result_queue):
     """별도 프로세스에서 실행되는 진입점. PyMuPDF 네이티브 크래시가 나도
-    이 프로세스만 죽고 메인 GUI 프로세스는 영향받지 않는다."""
+    이 프로세스만 죽고 메인 GUI 프로세스는 영향받지 않는다.
+    내부 로그를 모아 메인 프로세스로 돌려보내(GUI 작업 로그에 표시) 디버깅을
+    돕는다 — 그렇지 않으면 매칭/복사 과정이 전혀 안 보여 '왜 0개인지' 알 수 없다."""
+    logs = []
     try:
         copied, skipped = copy_markups_with_position_correction(
-            src_path, dst_path, out_path, log_fn=None
+            src_path, dst_path, out_path, log_fn=lambda m: logs.append(m)
         )
-        result_queue.put(("ok", copied, skipped))
+        result_queue.put(("ok", copied, skipped, logs))
     except Exception as e:
-        result_queue.put(("error", str(e)))
+        logs.append(f"  💥 위치 보정 예외: {e}\n")
+        result_queue.put(("error", str(e), logs))
 
 
 def run_position_correction_isolated(src_path, dst_path, out_path,
@@ -1173,6 +1177,10 @@ def run_position_correction_isolated(src_path, dst_path, out_path,
             f"위치 보정 작업이 비정상 종료되었습니다 (exit code {exitcode}). "
             "PyMuPDF 내부 오류로 추정됩니다. Source/Target에 매칭 가능한 Tag가 있는지 확인하세요."
         )
+
+    # 서브프로세스가 모은 내부 로그를 GUI 작업 로그로 그대로 출력
+    for line in (result[-1] if isinstance(result[-1], list) else []):
+        log(line)
 
     status = result[0]
     if status == "error":
@@ -2183,6 +2191,7 @@ class App(tk.Tk):
                 copied, skipped = run_position_correction_isolated(
                     open_src, dst_path, out_path, self._log
                 )
+                self._log(f"  → 복사 {copied}개 / 스킵 {skipped}개\n")
                 report_rows.append({
                     "source": src_name2, "target": dst_name, "output": dst_name,
                     "status": "완료(위치보정)",
