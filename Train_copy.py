@@ -552,9 +552,10 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
 
 def _local_offset_matrix(pt, pairs, k=3):
     """pt(소스 좌표) 근처의 매칭된 Tag k개(거리 역제곱 가중)를 이용해
-    그 지역의 실제 이동량만큼만 평행이동하는 행렬을 만든다.
+    그 지역의 회전/스케일/이동을 모두 반영하는 유사변환(similarity transform)
+    행렬을 만든다. 기준점이 1개뿐이면 평행이동만 적용한다.
     도면이 전체적으로 하나의 회전/스케일로 맞지 않고 구역마다 CAD 배치가
-    달라진 경우, 전역 변환보다 마크업 주변의 국소 이동량을 쓰는 게 더 정확하다."""
+    달라진 경우, 전역 변환보다 마크업 주변의 국소 변환을 쓰는 게 더 정확하다."""
     p = complex(*pt)
     dists = sorted(
         ((abs(complex(*sp) - p), sp, dp) for sp, dp in pairs),
@@ -563,9 +564,27 @@ def _local_offset_matrix(pt, pairs, k=3):
     chosen = dists[:max(1, min(k, len(dists)))]
     weights = [1.0 / (d * d + 1.0) for d, _, _ in chosen]
     wsum = sum(weights)
-    dx = sum(w * (dp[0] - sp[0]) for w, (_, sp, dp) in zip(weights, chosen)) / wsum
-    dy = sum(w * (dp[1] - sp[1]) for w, (_, sp, dp) in zip(weights, chosen)) / wsum
-    return fitz.Matrix(1, 0, 0, 1, dx, dy)
+
+    zs = [complex(*sp) for _, sp, _ in chosen]
+    ws = [complex(*dp) for _, _, dp in chosen]
+    zbar = sum(w * z for w, z in zip(weights, zs)) / wsum
+    wbar = sum(w * v for w, v in zip(weights, ws)) / wsum
+
+    den = sum(wt * abs(z - zbar) ** 2 for wt, z in zip(weights, zs))
+    if den < 1e-9 or len(chosen) < 2:
+        # 기준점이 1개거나 모두 같은 위치면 회전/스케일을 구할 수 없어 평행이동만 적용
+        dx = wbar.real - zbar.real
+        dy = wbar.imag - zbar.imag
+        return fitz.Matrix(1, 0, 0, 1, dx, dy)
+
+    num = sum(
+        wt * (z - zbar).conjugate() * (v - wbar)
+        for wt, z, v in zip(weights, zs, ws)
+    )
+    a = num / den  # 복소수: 회전+스케일을 동시에 표현
+    b = wbar - a * zbar
+
+    return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
 
 
 def _is_finite_point(pt) -> bool:
