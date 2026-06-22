@@ -582,8 +582,17 @@ def _local_offset_matrix(pt, pairs, k=3):
         for wt, z, v in zip(weights, zs, ws)
     )
     a = num / den  # 복소수: 회전+스케일을 동시에 표현
-    b = wbar - a * zbar
+    scale = abs(a)
 
+    # 가까운 기준점들이 한 줄로 거의 모여있으면(분모가 작음) 회전/스케일 추정이
+    # 불안정해져 마크업이 비정상적으로 늘어나거나 뒤집힐 수 있다.
+    # 스케일이 비정상적인 범위면 평행이동만 적용하는 안전한 방식으로 되돌린다.
+    if not math.isfinite(scale) or scale < 0.5 or scale > 2.0:
+        dx = wbar.real - zbar.real
+        dy = wbar.imag - zbar.imag
+        return fitz.Matrix(1, 0, 0, 1, dx, dy)
+
+    b = wbar - a * zbar
     return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
 
 
