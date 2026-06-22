@@ -88,6 +88,34 @@ def extract_manual_anchor_points(page, log_prefix=""):
     return found
 
 
+def list_cloud_shape_info(page, log_prefix=""):
+    """Square/Circle/Polygon/PolyLine 마크업의 border(clouds 포함)와 AP(외형)
+    스트림 길이를 출력한다. Bluebeam의 구름(cloud) 테두리가 PDF 표준 /BE
+    clouds 속성으로 저장돼 있는지, 아니면 커스텀 외형(appearance) 그림으로
+    저장돼 있는지 확인하기 위한 진단용."""
+    for annot in page.annots() or []:
+        subtype = annot.type[1]
+        if subtype not in ("Square", "Circle", "Polygon", "PolyLine"):
+            continue
+        border = annot.border or {}
+        try:
+            kind, ap_val = page.parent.xref_get_key(annot.xref, "AP")
+        except Exception:
+            kind, ap_val = None, None
+        ap_n_xref = None
+        ap_len = None
+        if kind == "dict" and ap_val:
+            m = re.search(r'/N\s+(\d+)\s+0\s+R', ap_val)
+            if m:
+                ap_n_xref = int(m.group(1))
+                try:
+                    ap_len = len(page.parent.xref_stream(ap_n_xref) or b"")
+                except Exception:
+                    ap_len = -1
+        print(f"{log_prefix}  xref={annot.xref} type={subtype} "
+              f"border={border} AP_N_xref={ap_n_xref} AP_stream_len={ap_len}")
+
+
 def list_all_annot_colors(page, log_prefix=""):
     """모든 마크업의 실제 색상 수치(stroke/fill, 0~1 범위)를 출력한다.
     마젠타(1,0,1) 인식이 안 될 때 실제 저장된 색상값을 확인하기 위한 진단용."""

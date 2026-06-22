@@ -614,6 +614,48 @@ _SUPPORTED_TRANSFORM_TYPES = {
     "FreeText", "Highlight", "Ink", "StrikeOut", "Underline", "Squiggly",
 }
 
+# FreeText에서 쓰이는 일반 글꼴 이름을 PyMuPDF의 기본 14종 글꼴로 매핑.
+# (임베드되지 않은 글꼴은 정확히 재현할 수 없어 가장 비슷한 기본 글꼴로 대체)
+_FONT_NAME_MAP = {
+    "helvetica": "helv", "arial": "helv", "arial narrow": "helv",
+    "arial black": "helv", "calibri": "helv", "verdana": "helv",
+    "times new roman": "tiro", "times": "tiro", "georgia": "tiro",
+    "courier new": "cour", "courier": "cour", "consolas": "cour",
+}
+
+
+def _map_freetext_fontname(name) -> str:
+    if not name:
+        return "helv"
+    return _FONT_NAME_MAP.get(name.strip().lower(), "helv")
+
+
+def _parse_freetext_style(doc, xref):
+    """FreeText 마크업의 /DS(Default Style) 문자열에서 글꼴명/크기/글자색을,
+    /Q에서 정렬을 읽어온다. 값이 없으면 합리적인 기본값을 반환."""
+    fontsize, fontname, text_color = 11.0, "helv", (0, 0, 0)
+    try:
+        kind, ds = doc.xref_get_key(xref, "DS")
+    except Exception:
+        kind, ds = None, None
+    if kind == "string" and ds:
+        m = re.search(r'font:\s*([\d.]+)pt\s+[\'"]?([^;\'"]+)[\'"]?', ds)
+        if m:
+            fontsize = float(m.group(1))
+            fontname = _map_freetext_fontname(m.group(2))
+        m2 = re.search(r'color:\s*#([0-9A-Fa-f]{6})', ds)
+        if m2:
+            hexcol = m2.group(1)
+            text_color = tuple(int(hexcol[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    align = 0
+    try:
+        kind_q, q_val = doc.xref_get_key(xref, "Q")
+        if kind_q == "int" and q_val:
+            align = int(q_val)
+    except Exception:
+        pass
+    return fontsize, fontname, text_color, align
+
 
 def _copy_annot_with_transform(src_annot, dst_page, matrix):
     """src_annot의 geometry를 matrix로 변환해 dst_page에 동일한 종류의 마크업을 생성.
@@ -623,7 +665,8 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
     stroke = colors.get("stroke")
     fill = colors.get("fill")
     border_info = src_annot.border or {}
-    width = border_info.get("width", 1) or 1
+    width = border_info.get("width")
+    width = 1 if width is None else width  # 0(테두리 없음)은 그대로 0 유지
     clouds = border_info.get("clouds", 0) or 0
     dashes = border_info.get("dashes") or None
     opacity = src_annot.opacity if src_annot.opacity is not None else 1
@@ -681,7 +724,19 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
             if not _is_finite_rect(rect):
                 return False
             text = (src_annot.info or {}).get("content", "") or ""
-            new_annot = dst_page.add_freetext_annot(rect, text)
+            ft_scale = math.hypot(matrix.a, matrix.b)
+            fontsize, fontname, text_color, align = _parse_freetext_style(
+                src_annot.parent.parent, src_annot.xref
+            )
+            new_annot = dst_page.add_freetext_annot(
+                rect, text,
+                fontsize=fontsize * ft_scale,
+                fontname=fontname,
+                text_color=text_color,
+                fill_color=fill,
+                border_color=stroke,
+                align=align,
+            )
         elif subtype in ("Highlight", "StrikeOut", "Underline", "Squiggly"):
             quads = src_annot.vertices
             if not quads or len(quads) < 4:
