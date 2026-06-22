@@ -597,6 +597,57 @@ def _global_similarity_matrix(pairs):
     return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
 
 
+def _global_scale_translate_matrix(pairs):
+    """모든 기준점 쌍으로 '회전 없는' 단일 변환(균일 스케일 + 평행이동, 자유도 3)을
+    최소제곱 적합한다. 두 도면이 같은 방향(회전 관계 아님)인데도 유사변환을 쓰면,
+    기준점들의 비균일한 어긋남을 최소제곱이 '약간의 회전'으로 메꿔 모든 마크업이
+    통째로 기울어져 보인다. 회전 성분을 빼면 마크업이 절대 기울지 않고 종횡비도
+    보존된다. 남는 국소 오차는 _idw_offset의 평행이동 보정으로 따로 잡는다."""
+    n = len(pairs)
+    if n == 0:
+        return fitz.Matrix(1, 0, 0, 1, 0, 0)
+    sx = sum(sp[0] for sp, _ in pairs) / n
+    sy = sum(sp[1] for sp, _ in pairs) / n
+    dx = sum(dp[0] for _, dp in pairs) / n
+    dy = sum(dp[1] for _, dp in pairs) / n
+    # s = Σ(z-zbar)·(w-wbar) / Σ|z-zbar|²  (실수 내적, 회전 없는 균일 스케일)
+    num = sum((sp[0] - sx) * (dp[0] - dx) + (sp[1] - sy) * (dp[1] - dy)
+              for sp, dp in pairs)
+    den = sum((sp[0] - sx) ** 2 + (sp[1] - sy) ** 2 for sp, _ in pairs)
+    if den < 1e-9 or n < 2:
+        return fitz.Matrix(1, 0, 0, 1, dx - sx, dy - sy)
+    s = num / den
+    if not math.isfinite(s) or s < 0.5 or s > 2.0:
+        return fitz.Matrix(1, 0, 0, 1, dx - sx, dy - sy)
+    # p' = s*(p - pbar_src) + pbar_dst  →  Matrix(s,0,0,s, dx - s*sx, dy - s*sy)
+    return fitz.Matrix(s, 0, 0, s, dx - s * sx, dy - s * sy)
+
+
+def _idw_offset(center, pairs, base_matrix, power=2.0):
+    """전역 변환(base_matrix)을 적용한 뒤 남는 국소 위치 오차를, center(소스 좌표)
+    주변 기준점들의 '실제 어긋남(잔차)'을 거리 역가중(IDW)으로 보간해 평행이동
+    보정량 (ox, oy)로 돌려준다. 마크업이 기준점에 가까울수록 그 기준점이 가리키는
+    정확한 위치로 끌려간다. 평행이동만이라 마크업 모양/기울기는 변하지 않고,
+    서로 가까운 멀티파트(구름+콜아웃)는 거의 같은 양만큼 이동해 어긋나지 않는다."""
+    cx, cy = center[0], center[1]
+    total_w = 0.0
+    ox = oy = 0.0
+    for sp, dp in pairs:
+        pred = fitz.Point(sp[0], sp[1]) * base_matrix  # 전역 변환 후 예측 위치
+        rx = dp[0] - pred.x          # 잔차(목표 - 예측), 대상 좌표
+        ry = dp[1] - pred.y
+        d2 = (cx - sp[0]) ** 2 + (cy - sp[1]) ** 2
+        if d2 < 1e-6:
+            return (rx, ry)          # 기준점 위에 정확히 있는 마크업
+        w = 1.0 / (d2 ** (power / 2.0))
+        ox += w * rx
+        oy += w * ry
+        total_w += w
+    if total_w <= 0:
+        return (0.0, 0.0)
+    return (ox / total_w, oy / total_w)
+
+
 def _is_finite_point(pt) -> bool:
     return math.isfinite(pt[0]) and math.isfinite(pt[1]) and \
         abs(pt[0]) < 1_000_000 and abs(pt[1]) < 1_000_000
@@ -1143,14 +1194,14 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
 
     src_page_idx, dst_page_idx, pairs, skip_xrefs = match_result
 
-    # 도면 한 장 전체에 동일한 단일 유사변환을 적용한다. 마크업마다 국소 변환을
-    # 쓰면 클라우드+콜아웃처럼 여러 조각으로 된 마크업이 서로 어긋나므로, 전역
-    # 변환으로 마크업 간 상대 위치를 그대로 보존한다.
-    matrix = _global_similarity_matrix(pairs)
-    rot_deg = math.degrees(math.atan2(matrix.b, matrix.a))
-    scale = math.hypot(matrix.a, matrix.b)
+    # 전역 변환은 '회전 없는' 균일 스케일+평행이동만 쓴다(마크업이 통째로 기울지
+    # 않도록). 남는 국소 위치 오차는 마크업마다 주변 기준점의 어긋남을 거리가중
+    # 보간(IDW)한 '평행이동'으로 따로 보정한다 — 평행이동만이라 모양/기울기는
+    # 안 변하고, 가까운 멀티파트(구름+콜아웃)는 거의 같은 양 이동해 안 어긋난다.
+    base_matrix = _global_scale_translate_matrix(pairs)
+    scale = base_matrix.a
     log(f"  [위치 보정] 기준점 {len(pairs)}개로 전역 변환 적용 "
-        f"(회전 {rot_deg:.2f}°, 배율 {scale:.4f}, "
+        f"(회전 0° 고정, 배율 {scale:.4f}, 국소 IDW 보정 ON, "
         f"Source p{src_page_idx+1} → Target p{dst_page_idx+1})\n")
 
     src_page = src_doc[src_page_idx]
@@ -1160,6 +1211,11 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     for annot in src_page.annots() or []:
         if annot.xref in skip_xrefs:
             continue  # 수동 기준점 마크업 자체는 복사하지 않음
+        # 이 마크업 중심 주변 기준점들로 국소 평행이동 보정량을 구해 전역 변환에 합성
+        c = annot.rect
+        center = ((c.x0 + c.x1) / 2.0, (c.y0 + c.y1) / 2.0)
+        ox, oy = _idw_offset(center, pairs, base_matrix)
+        matrix = base_matrix * fitz.Matrix(1, 0, 0, 1, ox, oy)
         ok = _clone_annot_with_appearance(annot, dst_page, matrix)
         if not ok:
             ok = _copy_annot_with_transform(annot, dst_page, matrix)
