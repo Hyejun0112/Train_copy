@@ -657,6 +657,117 @@ def _parse_freetext_style(doc, xref):
     return fontsize, fontname, text_color, align
 
 
+def _annot_ap_normal_xref(doc, annot_xref):
+    """annot의 AP(외형) Normal 스트림 xref를 반환. 없으면 None."""
+    try:
+        kind, value = doc.xref_get_key(annot_xref, "AP")
+    except Exception:
+        return None
+    if kind != "dict" or not value:
+        return None
+    m = re.search(r'/N\s+(\d+)\s+0\s+R', value)
+    return int(m.group(1)) if m else None
+
+
+def _parse_pdf_floats(s):
+    return [float(x) for x in re.findall(r'-?\d+(?:\.\d+)?', s)]
+
+
+def _pdf_escape_text(text) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
+    """원본 마크업의 실제 외형(AP, appearance stream)을 그대로 재사용해
+    위치/회전/스케일만 적용한다. Bluebeam의 구름(cloud) 테두리, 글꼴/색상 등
+    PyMuPDF의 geometry 재생성 방식으로는 재현이 안 되는 모든 커스텀 외형을
+    원본 그대로 보존하기 위해, 새로 그리지 않고 원본 그림 자체를 transform한다."""
+    src_doc = src_annot.parent.parent
+    dst_doc = dst_page.parent
+    ap_xref = _annot_ap_normal_xref(src_doc, src_annot.xref)
+    if ap_xref is None:
+        return False
+    try:
+        stream = src_doc.xref_stream(ap_xref)
+        form_obj = src_doc.xref_object(ap_xref, compressed=False)
+    except Exception:
+        return False
+    if not stream or not form_obj:
+        return False
+
+    bbox_m = re.search(r'/BBox\s*\[([^\]]+)\]', form_obj)
+    if not bbox_m:
+        return False
+    bx = _parse_pdf_floats(bbox_m.group(1))
+    if len(bx) != 4:
+        return False
+    bbox = fitz.Rect(bx[0], bx[1], bx[2], bx[3])
+
+    mat_m = re.search(r'/Matrix\s*\[([^\]]+)\]', form_obj)
+    if mat_m:
+        mv = _parse_pdf_floats(mat_m.group(1))
+        old_matrix = fitz.Matrix(*mv) if len(mv) == 6 else fitz.Matrix(1, 0, 0, 1, 0, 0)
+    else:
+        old_matrix = fitz.Matrix(1, 0, 0, 1, 0, 0)
+
+    combined = old_matrix * matrix
+    corners = [
+        fitz.Point(bbox.x0, bbox.y0) * combined,
+        fitz.Point(bbox.x1, bbox.y0) * combined,
+        fitz.Point(bbox.x1, bbox.y1) * combined,
+        fitz.Point(bbox.x0, bbox.y1) * combined,
+    ]
+    if not all(_is_finite_point((c.x, c.y)) for c in corners):
+        return False
+    xs = [c.x for c in corners]
+    ys = [c.y for c in corners]
+    new_rect = fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+    if not _is_finite_rect(new_rect):
+        return False
+
+    subtype = src_annot.type[1]
+    opacity = src_annot.opacity if src_annot.opacity is not None else 1
+    content = (src_annot.info or {}).get("content", "") or ""
+
+    try:
+        new_ap_xref = dst_doc.get_new_xref()
+        dst_doc.update_object(
+            new_ap_xref,
+            "<< /Type /XObject /Subtype /Form "
+            f"/BBox [{bbox.x0:.4f} {bbox.y0:.4f} {bbox.x1:.4f} {bbox.y1:.4f}] "
+            f"/Matrix [{combined.a:.6f} {combined.b:.6f} {combined.c:.6f} "
+            f"{combined.d:.6f} {combined.e:.4f} {combined.f:.4f}] >>"
+        )
+        dst_doc.update_stream(new_ap_xref, stream)
+
+        contents_kv = ""
+        if content:
+            contents_kv = f" /Contents ({_pdf_escape_text(content)})"
+
+        new_annot_xref = dst_doc.get_new_xref()
+        dst_doc.update_object(
+            new_annot_xref,
+            "<< /Type /Annot /Subtype /" + subtype +
+            f" /Rect [{new_rect.x0:.4f} {new_rect.y0:.4f} {new_rect.x1:.4f} {new_rect.y1:.4f}] "
+            f"/AP << /N {new_ap_xref} 0 R >> /CA {opacity}{contents_kv} /F 4 >>"
+        )
+
+        page_xref = dst_page.xref
+        kind, annots_val = dst_doc.xref_get_key(page_xref, "Annots")
+        existing = []
+        if kind == "array" and annots_val:
+            existing = [int(x) for x in re.findall(r'(\d+)\s+0\s+R', annots_val)]
+        existing.append(new_annot_xref)
+        dst_doc.xref_set_key(
+            page_xref, "Annots",
+            "[" + " ".join(f"{x} 0 R" for x in existing) + "]"
+        )
+    except Exception:
+        return False
+
+    return True
+
+
 def _copy_annot_with_transform(src_annot, dst_page, matrix):
     """src_annot의 geometry를 matrix로 변환해 dst_page에 동일한 종류의 마크업을 생성.
     지원하지 않는 타입이면 False 반환(스킵)."""
@@ -831,7 +942,9 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         rect = annot.rect
         anchor = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
         matrix = _local_offset_matrix(anchor, pairs)
-        ok = _copy_annot_with_transform(annot, dst_page, matrix)
+        ok = _clone_annot_with_appearance(annot, dst_page, matrix)
+        if not ok:
+            ok = _copy_annot_with_transform(annot, dst_page, matrix)
         if ok:
             copied += 1
         else:
