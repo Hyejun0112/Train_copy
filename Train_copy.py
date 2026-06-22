@@ -691,7 +691,10 @@ def _copy_annot_with_transform(src_annot, dst_page, matrix):
         border_kwargs = {"width": width * scale}
         if dashes:
             border_kwargs["dashes"] = dashes
-        if clouds and subtype in ("Square", "Circle", "Polygon", "PolyLine"):
+        # Polygon/PolyLine은 원본 꼭짓점 자체가 이미 구름 모양이라(들쭐날쭐한 path를
+        # 그대로 복사함) clouds를 다시 적용하면 구름 효과가 중복되어 모양이 깨진다.
+        # Square/Circle은 단순 사각형/원으로만 재생성되므로 clouds가 필요하다.
+        if clouds and subtype in ("Square", "Circle"):
             border_kwargs["clouds"] = clouds
         try:
             new_annot.set_border(**border_kwargs)
