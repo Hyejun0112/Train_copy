@@ -879,8 +879,63 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
             new_annot_xref,
             "<< /Type /Annot /Subtype /" + subtype +
             f" /Rect [{new_rect.x0:.4f} {new_rect.y0:.4f} {new_rect.x1:.4f} {new_rect.y1:.4f}] "
-            f"/AP << /N {new_ap_xref} 0 R >> /CA {opacity}{contents_kv} /F 4 >>"
+            f"/AP << /N {new_ap_xref} 0 R >> /CA {opacity}{contents_kv} /F 4 "
+            f"/P {dst_page.xref} 0 R >>"
         )
+
+        # Adobe류 뷰어는 /AP만 있으면 그대로 그려주지만, Bluebeam은 자체 마크업
+        # 엔진이 타입별 필수 기하 키(Line=/L, Polygon·PolyLine=/Vertices,
+        # Ink=/InkList, Highlight 등=/QuadPoints, FreeText 말풍선선=/CL)가
+        # 없으면 마크업 자체를 인식·렌더링하지 않는 것으로 보인다(외형은 저장
+        # 되어도 화면에 전혀 안 보이는 현상의 실제 원인). 원본 키를 새 좌표계
+        # (matrix_pdf)로 변환해 그대로 옮겨준다.
+        def _xform_flat_pairs(raw_str):
+            nums = _parse_pdf_floats(raw_str)
+            out = []
+            for i in range(0, len(nums) - 1, 2):
+                p = fitz.Point(nums[i], nums[i + 1]) * matrix_pdf
+                out.append(p.x)
+                out.append(p.y)
+            return out
+
+        _GEOM_KEYS = ("L", "Vertices", "QuadPoints", "CL")
+        for gkey in _GEOM_KEYS:
+            try:
+                gkind, gval = src_doc.xref_get_key(src_annot.xref, gkey)
+            except Exception:
+                continue
+            if gkind != "array" or not gval:
+                continue
+            xs = _xform_flat_pairs(gval)
+            if not xs:
+                continue
+            arr_str = "[" + " ".join(f"{v:.4f}" for v in xs) + "]"
+            try:
+                dst_doc.xref_set_key(new_annot_xref, gkey, arr_str)
+            except Exception:
+                pass
+
+        try:
+            ikind, ival = src_doc.xref_get_key(src_annot.xref, "InkList")
+        except Exception:
+            ikind, ival = "null", None
+        if ikind == "array" and ival:
+            strokes_raw = re.findall(r'\[([^\[\]]*)\]', ival)
+            new_strokes = []
+            for sraw in strokes_raw:
+                xs = _xform_flat_pairs(sraw)
+                if xs:
+                    new_strokes.append(
+                        "[" + " ".join(f"{v:.4f}" for v in xs) + "]"
+                    )
+            if new_strokes:
+                try:
+                    dst_doc.xref_set_key(
+                        new_annot_xref, "InkList",
+                        "[" + " ".join(new_strokes) + "]"
+                    )
+                except Exception:
+                    pass
 
         # 원본 마크업의 스타일/속성 키(특히 /DA·/DS = Bluebeam이 읽는 글꼴 정보)를
         # 그대로 복사한다. 간접참조면 그 객체도 깊은 복사해 dst로 가져온다.
