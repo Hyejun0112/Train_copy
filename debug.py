@@ -252,6 +252,12 @@ def main():
     print(f"[SOURCE] 페이지 수: {src_doc.page_count}")
     print(f"[TARGET] 페이지 수: {dst_doc.page_count}")
 
+    print("\n[클라우드(구름 테두리) 진단] Square/Circle/Polygon/PolyLine의 border/AP 정보:")
+    for sp in src_doc:
+        list_cloud_shape_info(sp, log_prefix=f"[SOURCE p{sp.number}]")
+    for dp in dst_doc:
+        list_cloud_shape_info(dp, log_prefix=f"[TARGET p{dp.number}]")
+
     page_pairs = order_page_pairs_by_border_similarity(src_doc, dst_doc)
     if len(page_pairs) > 1:
         print(f"\n[보더 유사도] {len(page_pairs)}개 페이지 조합 중 유사한 쌍부터 시도:")
