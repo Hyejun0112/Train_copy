@@ -608,12 +608,26 @@ def _parse_freetext_style(doc, xref):
 
 
 def _annot_ap_normal_xref(doc, annot_xref):
-    """annot의 AP(외형) Normal 스트림 xref를 반환. 없으면 None."""
+    """annot의 AP(외형) Normal 스트림 xref를 반환. 없으면 None.
+    /AP 값 자체가 인라인 딕셔너리(kind=="dict")가 아니라 별도 객체에 대한
+    간접참조(kind=="xref")로 저장된 경우도 있다(FreeText 등에서 자주 보임) —
+    이 경우를 놓치면 AP 클론이 실패해 폰트/색상이 깨지는 geometry 재생성
+    방식으로 fallback되어 버린다."""
     try:
         kind, value = doc.xref_get_key(annot_xref, "AP")
     except Exception:
         return None
-    if kind != "dict" or not value:
+    if not value:
+        return None
+    if kind == "xref":
+        m_ref = re.match(r'(\d+)\s+0\s+R', value.strip())
+        if not m_ref:
+            return None
+        try:
+            value = doc.xref_object(int(m_ref.group(1)), compressed=False)
+        except Exception:
+            return None
+    elif kind != "dict":
         return None
     m = re.search(r'/N\s+(\d+)\s+0\s+R', value)
     return int(m.group(1)) if m else None
@@ -625,6 +639,16 @@ def _parse_pdf_floats(s):
 
 def _pdf_escape_text(text) -> str:
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _pdf_text_string(text) -> str:
+    """PDF 텍스트 문자열 리터럴을 만든다. 비ASCII(한글/러시아어 등)가 있으면
+    UTF-16BE+BOM의 16진 문자열로 인코딩해야 한다 — 단순 리터럴 (...)로 쓰면
+    PDFDocEncoding/Latin-1로 오인되어 깨진 글자(예: 모지바케)가 된다."""
+    if all(ord(ch) < 128 for ch in text):
+        return f"({_pdf_escape_text(text)})"
+    raw = text.encode("utf-16-be")
+    return f"<FEFF{raw.hex()}>"
 
 
 def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
@@ -733,7 +757,7 @@ def _clone_annot_with_appearance(src_annot, dst_page, matrix) -> bool:
 
         contents_kv = ""
         if content:
-            contents_kv = f" /Contents ({_pdf_escape_text(content)})"
+            contents_kv = f" /Contents {_pdf_text_string(content)}"
 
         new_annot_xref = dst_doc.get_new_xref()
         dst_doc.update_object(
