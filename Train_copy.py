@@ -503,15 +503,18 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
         src_map = _extract_tag_suffixes(sp)
         src_generic = _extract_generic_tags(sp)
         src_symbols = _extract_symbol_signatures(sp)
-        if not src_map and not src_generic and not src_symbols:
+        src_bubbles = _extract_instrument_bubbles(sp)
+        if not src_map and not src_generic and not src_symbols and not src_bubbles:
             continue
         dst_map = _extract_tag_suffixes(dp)
         dst_generic = _extract_generic_tags(dp)
         dst_symbols = _extract_symbol_signatures(dp)
+        dst_bubbles = _extract_instrument_bubbles(dp)
         common = sorted(set(src_map) & set(dst_map))
         common_generic = sorted(set(src_generic) & set(dst_generic))
         common_symbols = sorted(set(src_symbols) & set(dst_symbols))
-        total = len(common) + len(common_generic) + len(common_symbols)
+        common_bubbles = sorted(set(src_bubbles) & set(dst_bubbles))
+        total = len(common) + len(common_generic) + len(common_symbols) + len(common_bubbles)
         if total >= 2:
             # named_pairs: 마크업이 '소속된 Tag'를 찾을 수 있도록 Tag 텍스트와
             # 함께 보관한다(아래 _cluster_tag_anchor에서 사용). 모서리 보조점은
@@ -519,15 +522,19 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
             named_pairs = [(s, src_map[s], dst_map[s]) for s in common]
             named_pairs += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
             named_pairs += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
+            named_pairs += [(s, src_bubbles[s], dst_bubbles[s]) for s in common_bubbles]
             pairs = [(sp_, dp_) for _, sp_, dp_ in named_pairs]
             pairs += _border_corner_anchors(sp, dp)
             log(f"  [위치 보정] 자동 기준점 매칭 {total}개 발견 "
                 f"(배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
-                f"Symbol {len(common_symbols)}개, 모서리 4개 보조 추가, "
+                f"Symbol {len(common_symbols)}개 + 계기 버블 {len(common_bubbles)}개, "
+                f"모서리 4개 보조 추가, "
                 f"Source p{sp.number + 1} → Target p{dp.number + 1})\n")
             for s in common[:10]:
                 log(f"    - {s}\n")
             for s in common_generic[:10]:
+                log(f"    - {s}\n")
+            for s in common_bubbles[:10]:
                 log(f"    - {s}\n")
             return sp.number, dp.number, pairs, set(), named_pairs
     return None
@@ -729,6 +736,54 @@ def _extract_target_geometry(page):
     except Exception:
         pass
     return cache
+
+
+# 범례("INSTRUMENT IDENTIFICATION/계기 식별")의 표준 표기: 계기 Tag는 원을
+# 가로지르는 선으로 위/아래 두 줄로 나뉘어, 위에는 기능문자(PDI/LT/FT/TT 등),
+# 아래에는 루프번호(0152, 0151A 등)가 적힌다. PDF 텍스트 추출에서는 이 두 줄이
+# 보통 별개 단어로 떨어져 나오기 때문에(예: "PDI", "0152"), 하이픈 붙은 한 단어만
+# 잡는 _extract_generic_tags 로는 거의 인식이 안 된다. 원 안의 텍스트를 위/아래로
+# 나눠 합쳐 "PDI-0152" 형태로 재구성하면, 구름(클라우드) 마크업이 감싸는 계기를
+# 정확히 식별할 수 있어 클러스터→Tag 소속 보정(_cluster_tag_anchor)의 정확도가
+# 크게 올라간다.
+_BUBBLE_FUNC_RE = re.compile(r'^[A-Za-z]{1,6}$')
+_BUBBLE_LOOP_RE = re.compile(r'^\d{2,6}[A-Za-z]?$')
+
+
+def _extract_instrument_bubbles(page):
+    """페이지의 계기 버블(원+가로 분할선+위/아래 텍스트)을 찾아 'FUNC-LOOP'
+    Tag 문자열별 중심점을 반환한다. 같은 Tag가 여러 번 나오면 모호하므로 제외."""
+    geom = _extract_target_geometry(page)
+    circles = geom["circles"]
+    if not circles:
+        return {}
+    try:
+        words = page.get_text("words")
+    except Exception:
+        return {}
+    tag_map = {}
+    for ccx, ccy, r in circles:
+        if r < 5:
+            continue
+        upper, lower = [], []
+        for w in words:
+            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+            wx, wy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            if math.hypot(wx - ccx, wy - ccy) > r * 1.05:
+                continue
+            (upper if wy < ccy else lower).append((x0, text))
+        if not upper or not lower:
+            continue
+        up_text = "".join(t for _, t in sorted(upper))
+        low_text = "".join(t for _, t in sorted(lower))
+        if not _BUBBLE_FUNC_RE.match(up_text) or not _BUBBLE_LOOP_RE.match(low_text):
+            continue
+        tag = f"{up_text}-{low_text}"
+        if tag in tag_map:
+            tag_map[tag] = None  # 중복 발견 → 모호함 표시
+        else:
+            tag_map[tag] = (ccx, ccy)
+    return {k: v for k, v in tag_map.items() if v is not None}
 
 
 def _cluster_indices(rects, gap=12.0):
