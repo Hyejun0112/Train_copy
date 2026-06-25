@@ -665,6 +665,45 @@ def _global_scale_translate_matrix(pairs):
     return fitz.Matrix(s, 0, 0, s, dx - s * sx, dy - s * sy)
 
 
+# 국소 보정(IDW·Tag 소속)에서 마크업 하나가 끌려갈 수 있는 최대 평행이동(pt).
+# Train copy 사이 같은 설비의 실제 재배치는 길어야 수십~150pt 수준이다. 이보다
+# 큰 이동은 오매칭된 기준점이 끌어당기는 것이므로 상한으로 잘라 폭주를 막는다.
+LOCAL_MAX_OFFSET = 200.0
+
+
+def _inlier_pairs(pairs, base_matrix):
+    """전역 변환(base_matrix) 적용 후 잔차가 비정상적으로 큰 기준점 쌍(오매칭
+    또는 페이지를 가로지르는 이동)을 제외한 목록을 돌려준다. 이런 쌍이 IDW나
+    Tag 소속 보정에 남아 있으면 주변 마크업을 수백 pt씩 끌어당겨 폭주시킨다.
+    강인한 기준: 잔차가 (중앙값 + 3·MAD)와 절대 하한(LOCAL_MAX_OFFSET) 중
+    큰 값을 넘으면 이상치로 본다. 내부값이 너무 적게 남으면 원본을 유지한다."""
+    n = len(pairs)
+    if n < 6:
+        return pairs
+    res = []
+    for sp, dp in pairs:
+        pred = fitz.Point(sp[0], sp[1]) * base_matrix
+        res.append(math.hypot(dp[0] - pred.x, dp[1] - pred.y))
+    sres = sorted(res)
+    med = sres[n // 2]
+    devs = sorted(abs(r - med) for r in res)
+    mad = devs[n // 2]
+    thresh = max(med + 3.0 * (mad if mad > 1e-6 else 1.0), LOCAL_MAX_OFFSET)
+    inliers = [p for p, r in zip(pairs, res) if r <= thresh]
+    if len(inliers) < max(4, n // 2):
+        return pairs
+    return inliers
+
+
+def _clamp_offset(ox, oy, limit=LOCAL_MAX_OFFSET):
+    """국소 보정 평행이동의 크기를 limit 이내로 자른다(방향은 보존)."""
+    mag = math.hypot(ox, oy)
+    if mag <= limit or mag < 1e-9:
+        return ox, oy
+    k = limit / mag
+    return ox * k, oy * k
+
+
 def _idw_offset(center, pairs, base_matrix, power=2.0):
     """전역 변환(base_matrix)을 적용한 뒤 남는 국소 위치 오차를, center(소스 좌표)
     주변 기준점들의 '실제 어긋남(잔차)'을 거리 역가중(IDW)으로 보간해 평행이동
@@ -1481,6 +1520,19 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     src_page = src_doc[src_page_idx]
     dst_page = dst_doc[dst_page_idx]
 
+    # 국소 보정용 기준점은 전역 변환 후 잔차가 비정상적으로 큰 오매칭을 제거한
+    # 내부값만 쓴다(이상치가 IDW·Tag 소속 보정에 남으면 주변 마크업을 수백 pt씩
+    # 끌어당겨 폭주시킨다 — 변위 진단의 최대 866/898pt 이동이 그 증상이었다).
+    idw_pairs = _inlier_pairs(pairs, base_matrix)
+    named_pairs = [(nm, sp_, dp_) for (nm, sp_, dp_) in named_pairs
+                   if math.hypot(dp_[0] - (fitz.Point(sp_[0], sp_[1]) * base_matrix).x,
+                                 dp_[1] - (fitz.Point(sp_[0], sp_[1]) * base_matrix).y)
+                   <= LOCAL_MAX_OFFSET]
+    n_drop = len(pairs) - len(idw_pairs)
+    if n_drop > 0:
+        log(f"  [위치 보정] 국소 보정에서 오매칭 추정 기준점 {n_drop}개 제외 "
+            f"(잔차 과대 → 폭주 방지)\n")
+
     # 1차 패스: 마크업마다 전역+IDW 변환행렬과 transform된 rect/center를 미리 구한다.
     annots = [a for a in (src_page.annots() or []) if a.xref not in skip_xrefs]
     matrices = []   # 각 마크업의 base*IDW 행렬
@@ -1490,7 +1542,8 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     for a in annots:
         c = a.rect
         center = ((c.x0 + c.x1) / 2.0, (c.y0 + c.y1) / 2.0)
-        ox, oy = _idw_offset(center, pairs, base_matrix)
+        ox, oy = _idw_offset(center, idw_pairs, base_matrix)
+        ox, oy = _clamp_offset(ox, oy)
         m = base_matrix * fitz.Matrix(1, 0, 0, 1, ox, oy)
         tr = a.rect * m
         matrices.append(m)
@@ -1521,6 +1574,7 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         tag_name, sp_, dp_ = anchor
         pred = fitz.Point(sp_[0], sp_[1]) * base_matrix
         tag_dx, tag_dy = dp_[0] - pred.x, dp_[1] - pred.y
+        tag_dx, tag_dy = _clamp_offset(tag_dx, tag_dy)
         m_override = base_matrix * fitz.Matrix(1, 0, 0, 1, tag_dx, tag_dy)
         for i in members:
             matrices[i] = m_override
