@@ -477,7 +477,10 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
         suffix), (2) 텍스트가 완전히 동일한 일반 계측/제어밸브/Logic/OPC Tag,
         (3) 모양이 동일한 Symbol(벡터 도형)을 찾아 매칭하고, (4) 페이지 모서리를
         보조 기준점으로 추가한다.
-    반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...], skip_src_xrefs) — 못 찾으면 None"""
+    반환: (src_page_idx, dst_page_idx, [(src_pt, dst_pt), ...], skip_src_xrefs,
+          [(tag_name, src_pt, dst_pt), ...]) — 못 찾으면 None.
+    마지막 named_pairs는 마크업이 '소속된 Tag'를 찾기 위한 용도로, 모서리
+    보조점처럼 이름이 없는 anchor는 포함하지 않는다."""
     def log(msg):
         if log_fn:
             log_fn(msg)
@@ -494,7 +497,7 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
             skip_xrefs = {xref for xref, _ in src_sorted}
             log(f"  [위치 보정] 수동 기준점(마젠타 마크업) {len(pairs)}개 발견 — "
                 f"이 기준점만 사용 (Source p{sp.number + 1} → Target p{dp.number + 1})\n")
-            return sp.number, dp.number, pairs, skip_xrefs
+            return sp.number, dp.number, pairs, skip_xrefs, []
 
     for sp, dp in page_pairs:
         src_map = _extract_tag_suffixes(sp)
@@ -510,9 +513,13 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
         common_symbols = sorted(set(src_symbols) & set(dst_symbols))
         total = len(common) + len(common_generic) + len(common_symbols)
         if total >= 2:
-            pairs = [(src_map[s], dst_map[s]) for s in common]
-            pairs += [(src_generic[s], dst_generic[s]) for s in common_generic]
-            pairs += [(src_symbols[s], dst_symbols[s]) for s in common_symbols]
+            # named_pairs: 마크업이 '소속된 Tag'를 찾을 수 있도록 Tag 텍스트와
+            # 함께 보관한다(아래 _cluster_tag_anchor에서 사용). 모서리 보조점은
+            # 이름이 없는 anchor라 named_pairs에서 제외한다.
+            named_pairs = [(s, src_map[s], dst_map[s]) for s in common]
+            named_pairs += [(s, src_generic[s], dst_generic[s]) for s in common_generic]
+            named_pairs += [(s, src_symbols[s], dst_symbols[s]) for s in common_symbols]
+            pairs = [(sp_, dp_) for _, sp_, dp_ in named_pairs]
             pairs += _border_corner_anchors(sp, dp)
             log(f"  [위치 보정] 자동 기준점 매칭 {total}개 발견 "
                 f"(배관선번호 {len(common)}개 + 일반 Tag {len(common_generic)}개 + "
@@ -522,7 +529,7 @@ def _find_tag_matches(src_doc, dst_doc, log_fn=None):
                 log(f"    - {s}\n")
             for s in common_generic[:10]:
                 log(f"    - {s}\n")
-            return sp.number, dp.number, pairs, set()
+            return sp.number, dp.number, pairs, set(), named_pairs
     return None
 
 
@@ -648,12 +655,40 @@ def _idw_offset(center, pairs, base_matrix, power=2.0):
     return (ox / total_w, oy / total_w)
 
 
+# 클러스터(구름+지시선+콜아웃 묶음)가 '어떤 계장 Tag를 설명하는 마크업인지'를
+# 찾기 위한 최대 거리. 도면을 그리는 사람마다 CAD 배치가 달라져도(=도면이
+# 틀어져도) 마크업이 가리키는 실제 설비(Tag)는 동일하므로, 그 Tag 하나의
+# 정확한 이동량을 클러스터 전체에 우선 적용하면 평균치로 뭉개지는 일반 IDW
+# 보정보다 훨씬 정확하다. 너무 멀리 있는 Tag까지 엮이면 오매칭이 되므로
+# 적당한 거리 안에 있을 때만 채택한다.
+TAG_ASSOC_MAX_DIST = 200.0  # pt
+
+
+def _cluster_tag_anchor(src_center, named_pairs):
+    """클러스터의 Source 좌표 중심(src_center) 근처에서 가장 가까운 named anchor
+    Tag를 찾아 (tag_name, src_pt, dst_pt)를 돌려준다. 적당한 거리 안에 없으면 None."""
+    if not named_pairs:
+        return None
+    cx, cy = src_center
+    best = None
+    best_d = None
+    for name, sp, dp in named_pairs:
+        d = math.hypot(cx - sp[0], cy - sp[1])
+        if best_d is None or d < best_d:
+            best_d = d
+            best = (name, sp, dp)
+    if best is not None and best_d <= TAG_ASSOC_MAX_DIST:
+        return best
+    return None
+
+
 # ── CAD 형상 스냅(Target 도면의 실제 원/선에 마크업을 달라붙임) ───────────────
 # 기준점(IDW) 보정으로도 못 잡는 미세 어긋남을, Target PDF에 실제로 그려진
 # 도형(계장 심볼 원 / 배관선)에 마크업을 '가까울 때만' 달라붙여 해결한다.
 SNAP_ENABLED = True       # 형상 스냅 전체 토글
 SNAP_LINE_DIST = 14.0     # 선에 이 거리 안이면 선 위로 스냅(pt)
 SNAP_MAX_MOVE = 60.0      # 스냅 이동량이 이보다 크면 오스냅으로 보고 무시(pt)
+SNAP_CLOUD_SIZE = 70.0    # 이보다 큰 마크업(구름 등)은 원중심 스냅 판정에서 제외(pt)
 
 
 def _extract_target_geometry(page):
@@ -731,8 +766,13 @@ def _snap_offset_for_cluster(centers, rects, geom):
     스냅 대상이 없거나 이동량이 과하면 (0,0)."""
     best = None
     best_d = None
-    # 1) 계장 Tag → 심볼 원 중심: 멤버 중심이 어떤 원 안(반경*1.3)에 들면 그 중심으로
-    for cx, cy in centers:
+    # 1) 계장 Tag → 심볼 원 중심: 멤버 중심이 어떤 원 안(반경*1.3)에 들면 그 중심으로.
+    # 구름(클라우드)처럼 큰 마크업은 자기 자신이 심볼 영역을 통째로 덮고 있어
+    # 중심이 우연히 원 안에 들어가는 경우가 많으므로 판정에서 제외한다(작은
+    # Tag번호 박스/계측기 버블만 이 규칙의 대상으로 삼는다).
+    for (cx, cy), rc in zip(centers, rects):
+        if max(rc.width, rc.height) > SNAP_CLOUD_SIZE:
+            continue
         for ccx, ccy, r in geom["circles"]:
             d = math.hypot(cx - ccx, cy - ccy)
             if d < r * 1.3 and (best_d is None or d < best_d):
@@ -1310,7 +1350,7 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
             "2개 이상 찾지 못했습니다."
         )
 
-    src_page_idx, dst_page_idx, pairs, skip_xrefs = match_result
+    src_page_idx, dst_page_idx, pairs, skip_xrefs, named_pairs = match_result
 
     # 전역 변환은 '회전 없는' 균일 스케일+평행이동만 쓴다(마크업이 통째로 기울지
     # 않도록). 남는 국소 위치 오차는 마크업마다 주변 기준점의 어긋남을 거리가중
@@ -1330,6 +1370,7 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     matrices = []   # 각 마크업의 base*IDW 행렬
     t_rects = []    # transform된 rect(fitz)
     t_centers = []  # transform된 중심
+    s_centers = []  # Source 좌표 중심(클러스터→Tag 소속 판정에 사용)
     for a in annots:
         c = a.rect
         center = ((c.x0 + c.x1) / 2.0, (c.y0 + c.y1) / 2.0)
@@ -1339,6 +1380,41 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         matrices.append(m)
         t_rects.append(tr)
         t_centers.append(((tr.x0 + tr.x1) / 2.0, (tr.y0 + tr.y1) / 2.0))
+        s_centers.append(center)
+
+    # 클러스터링: 구름+지시선+콜아웃처럼 붙어있는 멀티파트를 한 덩어리로 묶는다.
+    # 이 클러스터 단위로 (1) Tag 소속 보정과 (2) CAD 형상 스냅을 둘 다 적용해
+    # 묶음 안의 마크업들이 서로 어긋나지 않게 한다.
+    from collections import defaultdict
+    cl = _cluster_indices(t_rects)
+    groups = defaultdict(list)
+    for i, cid in enumerate(cl):
+        groups[cid].append(i)
+
+    # 클러스터→Tag 소속 보정: 그리는 사람마다 CAD 배치가 달라져 도면이 서로
+    # 틀어지더라도, 마크업이 실제로 설명하는 설비(Tag)는 동일하다. 전체 평균
+    # 변환(IDW)이 아니라 '이 클러스터가 소속된 Tag 하나'의 정확한 이동량을
+    # 우선 적용해, 그 Tag가 도면 안에서 어디로 옮겨갔든 마크업이 따라가게 한다.
+    n_tag_assoc = 0
+    for members in groups.values():
+        cx = sum(s_centers[i][0] for i in members) / len(members)
+        cy = sum(s_centers[i][1] for i in members) / len(members)
+        anchor = _cluster_tag_anchor((cx, cy), named_pairs)
+        if anchor is None:
+            continue
+        tag_name, sp_, dp_ = anchor
+        pred = fitz.Point(sp_[0], sp_[1]) * base_matrix
+        tag_dx, tag_dy = dp_[0] - pred.x, dp_[1] - pred.y
+        m_override = base_matrix * fitz.Matrix(1, 0, 0, 1, tag_dx, tag_dy)
+        for i in members:
+            matrices[i] = m_override
+            tr = annots[i].rect * m_override
+            t_rects[i] = tr
+            t_centers[i] = ((tr.x0 + tr.x1) / 2.0, (tr.y0 + tr.y1) / 2.0)
+        n_tag_assoc += 1
+    if named_pairs:
+        log(f"  [위치 보정] Tag 소속 보정: {n_tag_assoc}개 클러스터가 "
+            f"가까운 Tag를 따라 이동\n")
 
     # 형상 스냅: 연결된 멀티파트가 안 어긋나도록 클러스터 단위로 같은 양만큼 스냅.
     snap_off = [(0.0, 0.0)] * len(annots)
@@ -1347,11 +1423,6 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         geom = _extract_target_geometry(dst_page)
         log(f"  [스냅] Target 형상 추출: 원 {len(geom['circles'])}개 / "
             f"수평선 {len(geom['hlines'])}개 / 수직선 {len(geom['vlines'])}개\n")
-        cl = _cluster_indices(t_rects)
-        from collections import defaultdict
-        groups = defaultdict(list)
-        for i, cid in enumerate(cl):
-            groups[cid].append(i)
         for members in groups.values():
             ctr = [t_centers[i] for i in members]
             rcs = [t_rects[i] for i in members]
