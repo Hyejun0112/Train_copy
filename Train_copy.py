@@ -1524,6 +1524,25 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
             f"라인 {n_snap['라인']}개 클러스터\n")
 
     copied, skipped = 0, 0
+    # 변위 진단: 단순 복사(원좌표 그대로) 대비 보정 후 마크업 중심이 실제로
+    # 얼마나 움직였는지 픽셀로 측정한다. "보정해도 안 변한다"는 체감이
+    # (a) 보정량이 실제 0에 가깝기 때문인지 (b) 보정은 되는데 화면에서 구분이
+    # 안 되는지 구분하기 위함. 이동량이 큰 항목 몇 개도 같이 찍는다.
+    moves = []
+    for i, (sx, sy) in enumerate(snap_off):
+        fcx = t_centers[i][0] + sx
+        fcy = t_centers[i][1] + sy
+        d = math.hypot(fcx - s_centers[i][0], fcy - s_centers[i][1])
+        moves.append(d)
+    if moves:
+        mv_avg = sum(moves) / len(moves)
+        mv_max = max(moves)
+        n_moved = sum(1 for d in moves if d >= 2.0)
+        log(f"  [위치 보정] 변위 진단: 마크업 {len(moves)}개 중 "
+            f"{n_moved}개가 2pt 이상 이동 "
+            f"(평균 {mv_avg:.1f}pt, 최대 {mv_max:.1f}pt). "
+            f"이 값이 0에 가까우면 두 도면이 이미 정렬되어 보정 불필요 상태.\n")
+
     for a, m, (sx, sy) in zip(annots, matrices, snap_off):
         if sx or sy:
             m = m * fitz.Matrix(1, 0, 0, 1, sx, sy)
