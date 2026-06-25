@@ -763,6 +763,8 @@ SNAP_ENABLED = True       # 형상 스냅 전체 토글
 SNAP_LINE_DIST = 14.0     # 선에 이 거리 안이면 선 위로 스냅(pt)
 SNAP_MAX_MOVE = 60.0      # 스냅 이동량이 이보다 크면 오스냅으로 보고 무시(pt)
 SNAP_CLOUD_SIZE = 70.0    # 이보다 큰 마크업(구름 등)은 원중심 스냅 판정에서 제외(pt)
+SNAP_LINE_DIST_FORCED = 55.0  # 라인 강제 대상(X·Spectacle blind 등)의 넓은 탐색 거리(pt)
+SNAP_MAX_MOVE_FORCED = 90.0   # 라인 강제 대상이 선에 붙기 위해 허용하는 최대 이동(pt)
 
 
 def _is_x_mark_annot(annot) -> bool:
@@ -908,24 +910,25 @@ def _cluster_indices(rects, gap=12.0):
     return [find(i) for i in range(n)]
 
 
-def _snap_offset_for_cluster(centers, rects, geom, is_x_list=None):
+def _snap_offset_for_cluster(centers, rects, geom, force_line_list=None):
     """클러스터에 속한 마크업들의 중심/rect를 보고, Target 도형(원/선)에
     '가까울 때만' 달라붙도록 클러스터 전체에 적용할 평행이동 (dx,dy)를 돌려준다.
     스냅 대상이 없거나 이동량이 과하면 (0,0).
-    is_x_list: 멤버별 'X' 캡필러리 표시 여부(같은 순서). X 표시는 Capillary/
-    계기배관이 공정선에 연결되는 지점이므로 원중심 스냅에서 제외하고
-    항상 라인 스냅을 우선 시도한다."""
-    if is_x_list is None:
-        is_x_list = [False] * len(centers)
+    force_line_list: 멤버별 '반드시 라인 위에 있어야 하는' 마크업 여부(같은 순서).
+    X(Capillary 연결점), Spectacle blind/Reducer 등 소스에서 공정선에 얹혀 있던
+    마크업이 해당된다. 이들은 원중심 스냅에서 제외하고, 라인이 더 멀리(타깃에서
+    이동) 있어도 붙도록 더 넓은 탐색 거리로 강제 라인 스냅한다."""
+    if force_line_list is None:
+        force_line_list = [False] * len(centers)
     best = None
     best_d = None
     # 1) 계장 Tag → 심볼 원 중심: 멤버 중심이 어떤 원 안(반경*1.3)에 들면 그 중심으로.
     # 구름(클라우드)처럼 큰 마크업은 자기 자신이 심볼 영역을 통째로 덮고 있어
     # 중심이 우연히 원 안에 들어가는 경우가 많으므로 판정에서 제외한다(작은
-    # Tag번호 박스/계측기 버블만 이 규칙의 대상으로 삼는다). X 표시(Capillary
-    # 연결점)도 원중심이 아니라 공정선에 붙어야 하므로 제외한다.
-    for (cx, cy), rc, is_x in zip(centers, rects, is_x_list):
-        if is_x or max(rc.width, rc.height) > SNAP_CLOUD_SIZE:
+    # Tag번호 박스/계측기 버블만 이 규칙의 대상으로 삼는다). 라인 강제 대상
+    # (X·Spectacle blind 등 공정선에 얹힌 것)도 원중심이 아니라 선에 붙어야 한다.
+    for (cx, cy), rc, force in zip(centers, rects, force_line_list):
+        if force or max(rc.width, rc.height) > SNAP_CLOUD_SIZE:
             continue
         for ccx, ccy, r in geom["circles"]:
             d = math.hypot(cx - ccx, cy - ccy)
@@ -936,29 +939,49 @@ def _snap_offset_for_cluster(centers, rects, geom, is_x_list=None):
         if math.hypot(*best) <= SNAP_MAX_MOVE:
             return best, "원중심"
         return (0.0, 0.0), None
-    # 2) Reducer/MIN/Capillary X → 가장 가까운 선 위로 스냅. 작은 마크업과
-    # X 표시만 대상(X는 크기와 무관하게 항상 라인 스냅 후보).
+    # 2) Reducer/MIN/Capillary X/Spectacle blind → 가장 가까운 선 위로 스냅.
+    # 작은 마크업과 라인 강제 대상만(강제 대상은 크기 무관, 더 넓은 탐색 거리/
+    # 더 큰 이동 허용 — 타깃에서 라인이 멀리 옮겨가도 다시 붙게).
     best = None
     best_d = None
-    for (cx, cy), rc, is_x in zip(centers, rects, is_x_list):
+    for (cx, cy), rc, force in zip(centers, rects, force_line_list):
         size = max(rc.width, rc.height)
-        if size > 160 and not is_x:
+        if size > 160 and not force:
             continue  # 너무 큰 마크업은 선 스냅 제외(큰 구름 등)
+        line_dist = SNAP_LINE_DIST_FORCED if force else SNAP_LINE_DIST
         for x0, x1, y in geom["hlines"]:
             if x0 - 6 <= cx <= x1 + 6:
                 d = abs(cy - y)
-                if d < SNAP_LINE_DIST and (best_d is None or d < best_d):
+                if d < line_dist and (best_d is None or d < best_d):
                     best_d = d
                     best = (0.0, y - cy)
         for x, y0, y1 in geom["vlines"]:
             if y0 - 6 <= cy <= y1 + 6:
                 d = abs(cx - x)
-                if d < SNAP_LINE_DIST and (best_d is None or d < best_d):
+                if d < line_dist and (best_d is None or d < best_d):
                     best_d = d
                     best = (x - cx, 0.0)
-    if best is not None and math.hypot(*best) <= SNAP_MAX_MOVE:
-        return best, "라인"
+    if best is not None:
+        # 강제 라인 대상은 더 큰 이동까지 허용(허공에 남느니 선에 붙는 게 맞다).
+        any_force = any(force_line_list)
+        cap = SNAP_MAX_MOVE_FORCED if any_force else SNAP_MAX_MOVE
+        if math.hypot(*best) <= cap:
+            return best, "라인"
     return (0.0, 0.0), None
+
+
+def _is_on_line(pt, geom, dist=6.0):
+    """점 pt가 geom의 수평/수직선 위(거리 dist 이내)에 얹혀 있는지 판정한다.
+    소스에서 라인에 붙어 있던 마크업(X·Spectacle blind·Reducer 등)을 찾아
+    타깃에서도 라인에 강제로 다시 붙이기 위한 1차 분류용."""
+    cx, cy = pt
+    for x0, x1, y in geom["hlines"]:
+        if x0 - 6 <= cx <= x1 + 6 and abs(cy - y) <= dist:
+            return True
+    for x, y0, y1 in geom["vlines"]:
+        if y0 - 6 <= cy <= y1 + 6 and abs(cx - x) <= dist:
+            return True
+    return False
 
 
 def _is_finite_point(pt) -> bool:
@@ -1591,13 +1614,18 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
     n_snap = {"원중심": 0, "라인": 0}
     if SNAP_ENABLED and annots:
         geom = _extract_target_geometry(dst_page)
+        # 소스 형상도 뽑아, 각 마크업이 '소스에서 라인에 얹혀 있었는지' 판정한다.
+        # 라인에 얹혀 있던 마크업(X·Spectacle blind·Reducer 등)은 타깃에서도
+        # 반드시 라인 위에 있어야 하므로 강제 라인 스냅 대상으로 표시한다.
+        src_geom = _extract_target_geometry(src_page)
+        on_src_line = [_is_on_line(s_centers[i], src_geom) for i in range(len(annots))]
         log(f"  [스냅] Target 형상 추출: 원 {len(geom['circles'])}개 / "
             f"수평선 {len(geom['hlines'])}개 / 수직선 {len(geom['vlines'])}개\n")
         for members in groups.values():
             ctr = [t_centers[i] for i in members]
             rcs = [t_rects[i] for i in members]
-            xs = [_is_x_mark_annot(annots[i]) for i in members]
-            (dx, dy), kind = _snap_offset_for_cluster(ctr, rcs, geom, xs)
+            force = [_is_x_mark_annot(annots[i]) or on_src_line[i] for i in members]
+            (dx, dy), kind = _snap_offset_for_cluster(ctr, rcs, geom, force)
             if kind:
                 n_snap[kind] += 1
                 for i in members:
