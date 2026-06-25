@@ -970,6 +970,49 @@ def _snap_offset_for_cluster(centers, rects, geom, force_line_list=None):
     return (0.0, 0.0), None
 
 
+# 리듀서 사이즈 표기 토큰: "80X", "80×", "100x" 등 (숫자 뒤 x/×). 그 뒤에 붙는
+# 숫자 마크업("50")은 리듀서 출구 사이즈를 뜻하므로, 도면이 틀어져도 이 토큰
+# 바로 옆을 따라가야 한다(허공에 뜨면 안 됨).
+_REDUCER_SIZE_RE = re.compile(r'^\d{1,4}\s*[xX×]$')
+_NUM_ONLY_RE = re.compile(r'^\d{1,4}$')   # 리듀서 사이즈 마크업은 순수 숫자("50")
+REDUCER_ADJ_DIST = 45.0    # 소스에서 숫자 마크업이 리듀서 토큰에 '붙어 있다'고 볼 거리
+REDUCER_MATCH_DIST = 140.0  # 타깃에서 대응 리듀서 토큰을 찾는 최대 반경
+
+
+def _extract_reducer_tokens(page):
+    """페이지에서 리듀서 사이즈 표기 토큰('80X','80×' 등)의 중심점 목록
+    [(cx, cy, text), ...]을 돌려준다(페이지에 캐시)."""
+    cache = getattr(page, "_reducer_tok_cache", None)
+    if cache is not None:
+        return cache
+    out = []
+    try:
+        for w in page.get_text("words"):
+            t = (w[4] or "").strip()
+            if _REDUCER_SIZE_RE.match(t):
+                out.append(((w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0, t))
+    except Exception:
+        pass
+    try:
+        page._reducer_tok_cache = out
+    except Exception:
+        pass
+    return out
+
+
+def _nearest_token(pt, tokens, max_dist):
+    """tokens([(cx,cy,text),...]) 중 pt에 가장 가까운 토큰을 max_dist 이내에서
+    찾아 (cx, cy)를 돌려준다. 없으면 None."""
+    best = None
+    best_d = None
+    for tx, ty, _ in tokens:
+        d = math.hypot(pt[0] - tx, pt[1] - ty)
+        if d <= max_dist and (best_d is None or d < best_d):
+            best_d = d
+            best = (tx, ty)
+    return best
+
+
 def _is_on_line(pt, geom, dist=6.0):
     """점 pt가 geom의 수평/수직선 위(거리 dist 이내)에 얹혀 있는지 판정한다.
     소스에서 라인에 붙어 있던 마크업(X·Spectacle blind·Reducer 등)을 찾아
@@ -1609,6 +1652,39 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         log(f"  [위치 보정] Tag 소속 보정: {n_tag_assoc}개 클러스터가 "
             f"가까운 Tag를 따라 이동\n")
 
+    # 리듀서 사이즈 배치 보정: "50"처럼 숫자만 있는 마크업이 소스에서 리듀서
+    # 사이즈 토큰("80X" 등) 바로 옆에 있으면, 이는 리듀서 출구 사이즈 표기다.
+    # 타깃에서 '대응되는 리듀서 토큰'을 찾아 그 토큰을 따라가게 해(상대 위치
+    # 보존), 도면이 틀어져도 허공이 아니라 리듀서 옆에 정확히 놓이게 한다.
+    src_red = _extract_reducer_tokens(src_page)
+    dst_red = _extract_reducer_tokens(dst_page)
+    reducer_placed = set()
+    n_reducer = 0
+    if src_red and dst_red:
+        for i, a in enumerate(annots):
+            content = ((a.info or {}).get("content", "") or "").strip()
+            if not _NUM_ONLY_RE.match(content):
+                continue
+            src_tok = _nearest_token(s_centers[i], src_red, REDUCER_ADJ_DIST)
+            if src_tok is None:
+                continue
+            spred = fitz.Point(src_tok[0], src_tok[1]) * base_matrix
+            dst_tok = _nearest_token((spred.x, spred.y), dst_red, REDUCER_MATCH_DIST)
+            if dst_tok is None:
+                continue
+            # 마크업이 소스 토큰을 따라간 만큼(=토큰 변위) 평행이동.
+            dxr, dyr = _clamp_offset(dst_tok[0] - spred.x, dst_tok[1] - spred.y)
+            m_override = base_matrix * fitz.Matrix(1, 0, 0, 1, dxr, dyr)
+            matrices[i] = m_override
+            tr = annots[i].rect * m_override
+            t_rects[i] = tr
+            t_centers[i] = ((tr.x0 + tr.x1) / 2.0, (tr.y0 + tr.y1) / 2.0)
+            reducer_placed.add(i)
+            n_reducer += 1
+        if n_reducer:
+            log(f"  [위치 보정] 리듀서 사이즈 보정: 숫자 마크업 {n_reducer}개를 "
+                f"타깃 리듀서 토큰 옆으로 이동\n")
+
     # 형상 스냅: 연결된 멀티파트가 안 어긋나도록 클러스터 단위로 같은 양만큼 스냅.
     snap_off = [(0.0, 0.0)] * len(annots)
     n_snap = {"원중심": 0, "라인": 0}
@@ -1622,6 +1698,10 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
         log(f"  [스냅] Target 형상 추출: 원 {len(geom['circles'])}개 / "
             f"수평선 {len(geom['hlines'])}개 / 수직선 {len(geom['vlines'])}개\n")
         for members in groups.values():
+            # 리듀서 사이즈로 이미 토큰 옆에 정확히 놓인 마크업은 스냅이 다시
+            # 끌어가지 않도록 그 클러스터는 건너뛴다.
+            if any(i in reducer_placed for i in members):
+                continue
             ctr = [t_centers[i] for i in members]
             rcs = [t_rects[i] for i in members]
             force = [_is_x_mark_annot(annots[i]) or on_src_line[i] for i in members]
