@@ -611,29 +611,57 @@ def _global_similarity_matrix(pairs):
     return fitz.Matrix(a.real, a.imag, -a.imag, a.real, b.real, b.imag)
 
 
-def _global_scale_translate_matrix(pairs):
-    """모든 기준점 쌍으로 '회전 없는' 단일 변환(균일 스케일 + 평행이동, 자유도 3)을
-    최소제곱 적합한다. 두 도면이 같은 방향(회전 관계 아님)인데도 유사변환을 쓰면,
-    기준점들의 비균일한 어긋남을 최소제곱이 '약간의 회전'으로 메꿔 모든 마크업이
-    통째로 기울어져 보인다. 회전 성분을 빼면 마크업이 절대 기울지 않고 종횡비도
-    보존된다. 남는 국소 오차는 _idw_offset의 평행이동 보정으로 따로 잡는다."""
+def _fit_scale_translate(pairs):
+    """주어진 기준점 쌍으로 '회전 없는' 균일 스케일+평행이동을 최소제곱 적합해
+    (s, sx, sy, dx, dy)를 돌려준다. den이 0이면 s=None."""
     n = len(pairs)
-    if n == 0:
-        return fitz.Matrix(1, 0, 0, 1, 0, 0)
     sx = sum(sp[0] for sp, _ in pairs) / n
     sy = sum(sp[1] for sp, _ in pairs) / n
     dx = sum(dp[0] for _, dp in pairs) / n
     dy = sum(dp[1] for _, dp in pairs) / n
-    # s = Σ(z-zbar)·(w-wbar) / Σ|z-zbar|²  (실수 내적, 회전 없는 균일 스케일)
     num = sum((sp[0] - sx) * (dp[0] - dx) + (sp[1] - sy) * (dp[1] - dy)
               for sp, dp in pairs)
     den = sum((sp[0] - sx) ** 2 + (sp[1] - sy) ** 2 for sp, _ in pairs)
     if den < 1e-9 or n < 2:
-        return fitz.Matrix(1, 0, 0, 1, dx - sx, dy - sy)
-    s = num / den
-    if not math.isfinite(s) or s < 0.5 or s > 2.0:
-        return fitz.Matrix(1, 0, 0, 1, dx - sx, dy - sy)
-    # p' = s*(p - pbar_src) + pbar_dst  →  Matrix(s,0,0,s, dx - s*sx, dy - s*sy)
+        return None, sx, sy, dx, dy
+    return num / den, sx, sy, dx, dy
+
+
+def _global_scale_translate_matrix(pairs):
+    """모든 기준점 쌍으로 '회전 없는' 단일 변환(균일 스케일 + 평행이동, 자유도 3)을
+    적합한다. 단순 최소제곱은 오매칭된 기준점 하나가 배율을 통째로 끌어당겨(예:
+    같은 도면 템플릿인데도 배율 0.90), 그 잘못된 축소가 모든 마크업에 균일하게
+    적용돼 이미 잘 맞던 영역까지 틀어뜨린다. → '이상치에 강인한' 절사
+    최소제곱으로 바꾼다: (1) 강인한 중앙값 평행이동을 씨앗으로 잡고 (2) 그
+    평행이동 기준 잔차가 큰 상위 30%(오매칭·국소 이동 설비)를 버린 뒤 (3) 남은
+    내부값(inlier)으로만 배율을 다시 적합한다. 같은 시트 템플릿이라 정상 배율은
+    1.0 근처여야 하므로, 적합 배율이 ±5%를 벗어나면 오매칭 잔재로 보고 순수
+    평행이동(배율 1.0)으로 되돌린다. 남는 국소 오차는 _idw_offset이 따로 잡는다."""
+    n = len(pairs)
+    if n == 0:
+        return fitz.Matrix(1, 0, 0, 1, 0, 0)
+    # 1) 강인한 씨앗: 좌표축별 평행이동의 중앙값(median)은 소수 이상치에 안 흔들린다.
+    dxs = sorted(dp[0] - sp[0] for sp, dp in pairs)
+    dys = sorted(dp[1] - sp[1] for sp, dp in pairs)
+    tdx = dxs[n // 2]
+    tdy = dys[n // 2]
+    if n < 6:
+        # 표본이 적으면 절사가 오히려 불안정 → 평행이동만(강인한 중앙값).
+        return fitz.Matrix(1, 0, 0, 1, tdx, tdy)
+    # 2) 순수 평행이동 기준 잔차로 정렬해 하위 70%만 내부값으로 채택(상위 30%
+    #    = 오매칭 또는 국소 이동 설비는 전역 배율 추정에서 제외).
+    scored = sorted(
+        pairs,
+        key=lambda p: math.hypot(p[1][0] - (p[0][0] + tdx),
+                                 p[1][1] - (p[0][1] + tdy)),
+    )
+    keep = max(4, int(len(scored) * 0.70))
+    inliers = scored[:keep]
+    # 3) 내부값으로만 배율+평행이동 재적합.
+    s, sx, sy, dx, dy = _fit_scale_translate(inliers)
+    if s is None or not math.isfinite(s) or abs(s - 1.0) > 0.05:
+        # 같은 템플릿 시트에서 ±5% 초과 배율은 오매칭 잔재 → 순수 평행이동.
+        return fitz.Matrix(1, 0, 0, 1, tdx, tdy)
     return fitz.Matrix(s, 0, 0, s, dx - s * sx, dy - s * sy)
 
 
@@ -1591,13 +1619,20 @@ def copy_markups_with_position_correction(src_path, dst_path, out_path, log_fn=N
             except Exception:
                 n_empty_ap += 1
                 continue
-            # 모든 픽셀이 동일(=내용 없음)하면 빈 외형으로 본다.
+            # 모든 픽셀이 동일(=내용 없음)하면 빈 외형으로 본다. 큰 마크업
+            # (구름 등)은 윗부분이 비어 있어 앞부분만 보면 멀쩡한데도 빈외형으로
+            # 오판되므로, 버퍼 전체를 일정 간격(stride)으로 훑어 변화가 있는지 본다.
             try:
                 samples = pm.samples
-                if not samples or len(set(samples[:4096])) <= 1:
+                if not samples:
                     n_empty_ap += 1
                 else:
-                    n_render_ok += 1
+                    stride = max(1, len(samples) // 4096)
+                    seen = set(samples[::stride])
+                    if len(seen) <= 1:
+                        n_empty_ap += 1
+                    else:
+                        n_render_ok += 1
             except Exception:
                 n_empty_ap += 1
         # 출력된 각 마크업의 외형(AP) /Matrix에 실제로 회전이 들어갔는지 측정.
